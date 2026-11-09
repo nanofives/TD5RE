@@ -191,6 +191,7 @@ static struct {
     double   along_s;             /* distance along the driver path (m) */
     double   ltx, ltz;            /* last pursuit target, world units (trace) */
     int      shots;               /* TD5RE_ROAM_SPRINT_SHOTS=1: frame dumps at the key moments */
+    int      natural_end;         /* [round VE] 1 = no end hold: the finished race ends the normal way at once */
     char     shot_done[12][24];
     int      nshot;
     int      exit_ok;             /* ENTER on the results panel returned to free roam, barriers cleared */
@@ -325,6 +326,7 @@ void td5_roam_sprint_test_arm(int mode)
     D.shots = td5_env_int("TD5RE_ROAM_SPRINT_SHOTS", 0, 0, 1);
     D.laps = SD_IS_CIRC(mode) ? td5_env_int("TD5RE_ROAM_CIRCUIT_LAPS", mode == TD5_RCIRCUIT_SMOKE ? 2 : 3, 1, TD5_RRACE_MAX_LAPS) : 1;
     td5_roam_ai_force_player_spot(SD_IS_CIRC(mode) ? 1 : (SD_IS_AI(mode) ? 3 : -1));   /* [F7] mid-pack, repeatable (play: random) */
+    td5_roam_race_dev_hold_end(1);   /* [round VE] the results are judged first; frame 75 of the finish lets the end run */
     snprintf(D.route_name, sizeof D.route_name, "%s",
              mode == TD5_RCIRCUIT_FULL ? "selftest_circuit" : mode == TD5_RCIRCUIT_SMOKE ? "selftest_circuit_smoke"
              : mode == TD5_RSPRINT_SMOKE ? "selftest_sprint_smoke" : mode == TD5_RSPRINT_FULL_AI ? "selftest_sprint_ai"
@@ -349,6 +351,15 @@ void td5_roam_sprint_test_disarm(void)
     if (D.trc) fclose(D.trc);
     memset(&D, 0, sizeof D);
     td5_roam_ai_force_player_spot(-1);
+    td5_roam_race_dev_hold_end(0);
+}
+
+/* [round VE] the v12 row: the race ends the normal way the moment the player is through (no hold, no judging
+ * wait); the self-test then follows it through the fade into the results screen and its menu */
+void td5_roam_sprint_test_set_natural_end(int on)
+{
+    D.natural_end = on ? 1 : 0;
+    td5_roam_race_dev_hold_end(!D.natural_end);
 }
 int  td5_roam_sprint_test_mode(void) { return D.mode; }
 int  td5_roam_sprint_test_done(void) { return D.mode && D.done; }
@@ -928,6 +939,15 @@ void td5_roam_sprint_test_frame(void)
             sd_shot("4_split");
         if (td5_roam_race_state() == TD5_RRACE_FINISHED) {
             D.phase = 4; D.phase_frames = 0;
+            if (D.natural_end) {
+                /* [round VE] judged NOW, the session ends with the fade */
+                s_res_snap = *td5_roam_race_result();
+                s_snap_nh = 1;
+                s_res_snap_h[0] = s_res_snap;
+                D.exit_ok = 1;
+                D.judged = 1;
+                sd_finish("finished (normal race end)", 0);
+            }
         } else if (td5_roam_race_state() == TD5_RRACE_OFF) {
             sd_finish("race ended without a finish", 1);
         }
@@ -961,10 +981,10 @@ void td5_roam_sprint_test_frame(void)
             }
             D.judged = 1;
             TD5_LOG_I(LOG_TAG, "[ROAMSPRINT] results ENTER pressed: race state %d, barriers %d -> %s",
-                      td5_roam_race_state(), nb, D.exit_ok ? "leaving to the geo generator (see the game log)" : "NOT ON THE RESULTS");
+                      td5_roam_race_state(), nb, D.exit_ok ? "the normal race end follows (see the game log)" : "NOT ON THE RESULTS");
         }
-        if (D.phase_frames == 75) td5_plat_input_inject_key(0x1C, 1);
-        if (D.phase_frames == 79) td5_plat_input_inject_key(0x1C, 0);
+        /* [round VE] the results panel's ENTER is gone: release the end hold, the race ends the normal way */
+        if (D.phase_frames == 75) td5_roam_race_dev_hold_end(0);
         if (D.phase_frames >= 90) sd_finish("finished", 0);
         break;
     default:

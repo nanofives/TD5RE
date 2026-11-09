@@ -113,7 +113,6 @@ static struct {
     RrHuman  hm[TD5_ROAM_MAX_HUMANS];
     /* requests the game takes */
     int      req_pause_close, req_countdown;
-    int      req_leave;            /* [roam HA] the results were dismissed: leave to the geo generator */
     int      cd_armed, rearm;
     /* [F7] the field's clock (runs on past the humans' finish while opponents race) */
     long     clock;
@@ -139,6 +138,8 @@ static int ke(int sc) { return R.cur[sc] && !R.prev[sc]; }
 #ifndef TD5RE_RELEASE
 static int s_dev_hold_finish;    /* [HE] DEV: no checkpoints / finish (the roam-walls test puts the car anywhere on the route) */
 void td5_roam_race_dev_hold_finish(int on) { s_dev_hold_finish = on ? 1 : 0; }
+static int s_dev_hold_end;       /* [round VE] DEV: the sprint tests judge the finished race before the normal end runs */
+void td5_roam_race_dev_hold_end(int on) { s_dev_hold_end = on ? 1 : 0; }
 #endif
 
 /* ============================================================ small helpers === */
@@ -300,7 +301,7 @@ static void rr_to_off(const char *why)
     if (R.state != TD5_RRACE_OFF)
         TD5_LOG_I(LOG_TAG, "ROAM_RACE: -> OFF (%s)", why);
     R.state = TD5_RRACE_OFF;
-    R.req_pause_close = 0; R.req_countdown = 0; R.cd_armed = 0; R.rearm = 0; R.req_leave = 0;
+    R.req_pause_close = 0; R.req_countdown = 0; R.cd_armed = 0; R.rearm = 0;
     R.bar_hold = 0;
     td5_roam_race_wall_end();
     td5_roam_barriers_set_visible(0);
@@ -366,6 +367,78 @@ void td5_roam_race_abandon(void)
         }
     }
     rr_to_off("abandoned");
+}
+
+/* ============================================================ the normal end [round VE] ===== */
+
+int td5_roam_race_end_ready(void)
+{
+    if (!td5_roam_active() || R.state != TD5_RRACE_FINISHED) return 0;
+#ifndef TD5RE_RELEASE
+    if (s_dev_hold_end) return 0;
+#endif
+    return 1;
+}
+
+void td5_roam_race_setup_get(TD5_RoamRaceSetup *out) { if (out) *out = R.setup; }
+
+/* One human's entry: its time, and a circuit's per-lap durations. */
+static void rr_final_human(TD5_RoamFinalEntry *e, int h)
+{
+    const TD5_RoamRaceResult *res = &R.hm[h].res;
+    int k;
+    e->finished = R.hm[h].finished;
+    e->ticks = res->ticks > 0 ? res->ticks : R.ticks;
+    e->nlap = 0;
+    for (k = 0; R.circuit && k < res->laps_done && k < TD5_RRACE_MAX_LAPS; k++)
+        e->lap[e->nlap++] = res->lap_ticks[k] - (k > 0 ? res->lap_ticks[k - 1] : 0);
+}
+
+/* The field in finishing order. An opponent still on the road gets the time its pace so far gives for the
+ * whole race (never ahead of the entry above it), the way a normal race estimates its unfinished AI. */
+int td5_roam_race_final_field(TD5_RoamFinalEntry *out, int max)
+{
+    TD5_RoamStanding st[6];
+    int n = td5_roam_ai_standings(st, 6), i, k = 0;
+    long prev = 0;
+    if (!out || max <= 0 || R.state < TD5_RRACE_RACING) return 0;
+    if (n <= 0) {
+        /* no AI field (a solo race): the humans by time, unfinished last */
+        int used[TD5_ROAM_MAX_HUMANS] = { 0 };
+        for (k = 0; k < R.nh && k < max; k++) {
+            int best = -1, h;
+            for (h = 0; h < R.nh; h++) {
+                if (used[h]) continue;
+                if (best < 0 || (R.hm[h].finished && !R.hm[best].finished) ||
+                    (R.hm[h].finished == R.hm[best].finished && R.hm[h].res.ticks < R.hm[best].res.ticks)) best = h;
+            }
+            used[best] = 1;
+            memset(&out[k], 0, sizeof out[k]);
+            out[k].slot = best;
+            rr_final_human(&out[k], best);
+        }
+        return k;
+    }
+    for (i = 0; i < n && k < max; i++) {
+        TD5_RoamFinalEntry *e = &out[k++];
+        memset(e, 0, sizeof *e);
+        e->slot = st[i].slot;
+        if (st[i].slot < R.nh) {
+            rr_final_human(e, st[i].slot);
+        } else if (st[i].finished && st[i].finish_ticks > 0) {
+            e->finished = 1;
+            e->ticks = st[i].finish_ticks;
+        } else {
+            const double done = st[i].along_m;
+            const long clock = R.clock > 0 ? R.clock : R.ticks;
+            e->finished = 0;
+            e->ticks = (done > 1.0 && R.finish_total > done) ? (long)((double)clock * R.finish_total / done + 0.5)
+                                                              : clock + 30L * 60L;
+        }
+        if (e->ticks <= prev) e->ticks = prev + 1;   /* finishing order is the standings' order */
+        prev = e->ticks;
+    }
+    return k;
 }
 
 long td5_roam_race_fin_ticks(void) { return R.state == TD5_RRACE_FINISHED ? R.hm[0].fin_t : 0; }   /* [HF] dev */
@@ -581,13 +654,6 @@ int td5_roam_race_start(const TD5_RoamRaceSetup *s)
               (unsigned)(t_bar - t0), bs.build_ms,
               bs.tiles_read, (unsigned)(t_grid - t_bar));
     return 1;
-}
-
-int td5_roam_race_take_leave(void)
-{
-    const int r = R.req_leave;
-    R.req_leave = 0;
-    return r;
 }
 
 int td5_roam_race_take_pause_close(void)
@@ -993,13 +1059,8 @@ void td5_roam_race_frame(void)
         if (paused && !td5_roam_route_ui_map_open() && ke(K_A)) { td5_roam_race_abandon(); break; }
         break;
     case TD5_RRACE_FINISHED:
-        if (td5_roam_route_ui_map_open()) { rr_to_off("route map"); break; }
-        if (paused) break;
-        /* [roam HA] "after a sprint is complete go back to the main menu of the geospatial generator"
-         * (sprint and circuit alike): ENTER on the results leaves the session, the game fades out
-         * and lands on the geo generator (td5_game.c, the same exit as LEAVE FREE ROAM) */
-        if (ke(K_ENTER) && !td5_env_int("TD5RE_ROAM_HF_FINLOG", 0, 0, 1)) { R.req_leave = 1; break; }
-        if (ke(K_F5)) { td5_roam_race_start(&R.setup); break; }
+        /* [round VE] no keys: every human through ends the race the normal way (td5_game.c reads
+         * td5_roam_race_end_ready: fade, finishing place / star, results screen + post-race menu) */
         break;
     default:
         break;
@@ -1075,40 +1136,6 @@ static uint32_t rr_name_col(int slot, int me, uint32_t other)
     return other;
 }
 
-/* [F7] the field under the results: rank, name, time and gap to the winner (or what is left to run) */
-static float rr_draw_field(const TD5_RoamRaceResult *res, int me, float X0, float W, float y, float S)
-{
-    char line[160], t[32], nm[16];
-    int i;
-    const long win = res->nfield > 0 ? res->field_ticks[0] : 0;
-    tx_c(X0 + W * 0.5f, y, "FINISHING ORDER", 0xFFFFB400, 16.0f * S);
-    y += 24.0f * S;
-    for (i = 0; i < res->nfield && i < 6; i++) {
-        const int slot = res->field_slot[i];
-        const long ft = res->field_ticks[i];
-        const uint32_t col = rr_name_col(slot, me, 0xFFFFFFFF);
-        if (ft > 0) {
-            rr_fmt_time(t, sizeof t, ft);
-            if (i == 0 || win <= 0) snprintf(line, sizeof line, "%d   %-6s   %s", i + 1, rr_racer_name(slot, nm, sizeof nm), t);
-            else snprintf(line, sizeof line, "%d   %-6s   %s   GAP %ld.%02ld", i + 1, rr_racer_name(slot, nm, sizeof nm), t,
-                          (ft - win) / TD5_RRACE_TICK_HZ, ((ft - win) % TD5_RRACE_TICK_HZ) * 100 / TD5_RRACE_TICK_HZ);
-        } else if (td5_roam_ai_count() > 0) {
-            const double togo = R.finish_total - res->field_along_m[i];
-            if (res->circuit)
-                snprintf(line, sizeof line, "%d   %-6s   RACING   LAP %d/%d", i + 1, rr_racer_name(slot, nm, sizeof nm),
-                         res->field_laps[i] + 1 > R.laps ? R.laps : res->field_laps[i] + 1, R.laps);
-            else
-                snprintf(line, sizeof line, "%d   %-6s   RACING   %.2f KM TO GO", i + 1, rr_racer_name(slot, nm, sizeof nm),
-                         (togo > 0.0 ? togo : 0.0) / 1000.0);
-        } else {
-            snprintf(line, sizeof line, "%d   %-6s   DNF", i + 1, rr_racer_name(slot, nm, sizeof nm));
-        }
-        tx_c(X0 + W * 0.5f, y, line, col, 15.0f * S);
-        y += 22.0f * S;
-    }
-    return y;
-}
-
 /* [F7] position + the field, top right of the pane, while racing */
 static void rr_draw_positions(int me, float X0, float Y0, float W, float S)
 {
@@ -1141,152 +1168,15 @@ static void rr_draw_positions(int me, float X0, float Y0, float W, float S)
     }
 }
 
-static void rr_draw_results(float W, float H, float S)
-{
-    const TD5_RoamRaceResult *res = &R.hm[0].res;
-    const float bw = 520.0f * S;
-    const int circ = res->circuit;
-    const int nrow = circ ? res->laps_done : (res->ncp > 1 ? res->ncp - 1 : 0);
-    const int nmax = circ ? TD5_RRACE_MAX_LAPS : 8;
-    const float rstep = circ ? 21.0f : 24.0f;
-    const int nfld = res->nfield > 1 ? res->nfield : 0;
-    const float bh = (circ ? 236.0f : 210.0f) * S + rstep * S * (float)(nrow > nmax ? nmax : nrow) + (nfld ? 34.0f + 22.0f * (float)nfld : 0.0f) * S;
-    const float bx = (W - bw) * 0.5f, by = (H - bh) * 0.5f;
-    char line[160], t[32], b[32];
-    int i;
-    qb_rect(bx - 3.0f * S, by - 3.0f * S, bw + 6.0f * S, bh + 6.0f * S, 0xFFFFB400);
-    qb_rect(bx, by, bw, bh, 0xF011161D);
-    if (nfld && res->player_rank > 0) {
-        static const char *const k_ord[] = { "1ST", "2ND", "3RD", "4TH", "5TH", "6TH" };
-        snprintf(line, sizeof line, "%s COMPLETE   %s OF %d", circ ? "CIRCUIT" : "SPRINT", k_ord[(res->player_rank - 1) % 6], nfld);
-        tx_c(W * 0.5f, by + 14.0f * S, line, 0xFFFFB400, 26.0f * S);
-    } else {
-        tx_c(W * 0.5f, by + 14.0f * S, circ ? "CIRCUIT COMPLETE" : "SPRINT COMPLETE", 0xFFFFB400, 26.0f * S);
-    }
-    tx_c(W * 0.5f, by + 50.0f * S, R.name[0] ? R.name : "UNSAVED ROUTE", 0xFFB8C2CF, 16.0f * S);
-    rr_fmt_time(t, sizeof t, res->ticks);
-    snprintf(line, sizeof line, "TIME  %s", t);
-    tx_c(W * 0.5f, by + 76.0f * S, line, 0xFFFFFFFF, 30.0f * S);
-    rr_fmt_time(b, sizeof b, res->best_ticks);
-    if (res->new_best && res->best_ticks > 0) snprintf(line, sizeof line, "NEW BEST   (WAS %s)", b);
-    else if (res->new_best) snprintf(line, sizeof line, "NEW BEST");
-    else if (res->best_ticks > 0) snprintf(line, sizeof line, "BEST  %s", b);
-    else snprintf(line, sizeof line, "SAVE THE ROUTE TO KEEP A BEST TIME");
-    tx_c(W * 0.5f, by + 116.0f * S, line, res->new_best ? 0xFF50E070 : 0xFFB8C2CF, 17.0f * S);
-    if (circ)
-        snprintf(line, sizeof line, "%d LAPS   %.2f KM   AVERAGE %.0f KM/H", res->laps, R.finish_total / 1000.0,
-                 res->ticks > 0 ? R.finish_total / ((double)res->ticks / TD5_RRACE_TICK_HZ) * 3.6 : 0.0);
-    else
-        snprintf(line, sizeof line, "%.2f KM   AVERAGE %.0f KM/H", R.length_m / 1000.0,
-                 res->ticks > 0 ? R.length_m / ((double)res->ticks / TD5_RRACE_TICK_HZ) * 3.6 : 0.0);
-    tx_c(W * 0.5f, by + 142.0f * S, line, 0xFFB8C2CF, 15.0f * S);
-    if (circ) {
-        rr_fmt_time(t, sizeof t, res->best_lap_ticks);
-        rr_fmt_time(b, sizeof b, res->best_lap_prev);
-        if (res->new_best_lap && res->best_lap_prev > 0) snprintf(line, sizeof line, "BEST LAP  %s   NEW BEST  (WAS %s)", t, b);
-        else if (res->new_best_lap) snprintf(line, sizeof line, "BEST LAP  %s   NEW BEST", t);
-        else snprintf(line, sizeof line, "BEST LAP  %s", t);
-        tx_c(W * 0.5f, by + 164.0f * S, line, res->new_best_lap ? 0xFF50E070 : 0xFFFFE070, 15.0f * S);
-    }
-    for (i = 0; i < nrow && i < nmax; i++) {
-        if (circ) {
-            const long lt = res->lap_ticks[i] - (i > 0 ? res->lap_ticks[i - 1] : 0);
-            rr_fmt_time(t, sizeof t, lt);
-            snprintf(line, sizeof line, "LAP %d   %s", i + 1, t);
-            tx_c(W * 0.5f, by + (194.0f + rstep * (float)i) * S, line, lt == res->best_lap_ticks ? 0xFF50E070 : 0xFFFFFFFF, 14.0f * S);
-        } else {
-            rr_fmt_time(t, sizeof t, res->split_ticks[i]);
-            snprintf(line, sizeof line, "CHECKPOINT %d   %s", i + 1, t);
-            tx_c(W * 0.5f, by + (172.0f + 24.0f * (float)i) * S, line, 0xFFFFFFFF, 15.0f * S);
-        }
-    }
-    if (nfld) rr_draw_field(res, 0, 0.0f, W, by + ((circ ? 200.0f : 178.0f) + rstep * (float)(nrow > nmax ? nmax : nrow)) * S, S);
-    tx_c(W * 0.5f, by + bh - 28.0f * S, "ENTER BACK TO THE GENERATOR   M ROUTE MAP   F5 RACE AGAIN", 0xFFFFE070, 15.0f * S);
-}
-
-/* [roam RA] a human's splits on one line: checkpoint times (sprint) or lap times (circuit) */
-static void rr_splits_line(const TD5_RoamRaceResult *res, char *out, size_t cap)
-{
-    char t[32];
-    int i, n;
-    size_t len;
-    if (res->circuit) {
-        snprintf(out, cap, "LAPS");
-        n = res->laps_done;
-    } else {
-        snprintf(out, cap, "SPLITS");
-        n = res->ncp > 1 ? res->ncp - 1 : 0;
-    }
-    if (!res->finished && n == 0) { snprintf(out, cap, "DID NOT FINISH"); return; }
-    for (i = 0; i < n && i < 8; i++) {
-        const long v = res->circuit ? res->lap_ticks[i] - (i > 0 ? res->lap_ticks[i - 1] : 0) : res->split_ticks[i];
-        if (v <= 0) break;
-        rr_fmt_time(t, sizeof t, v);
-        len = strlen(out);
-        if (len + 12 >= cap) break;
-        snprintf(out + len, cap - len, "   %s", t);
-    }
-    if (n == 0 && !res->circuit) {
-        len = strlen(out);
-        snprintf(out + len, cap - len, "   NONE ON THIS ROUTE");
-    }
-}
-
-/* [roam RA] the split-screen results: one panel over every pane, the whole field in finishing order, then each
- * human's total, best-time verdict and splits / laps */
-static void rr_draw_results_mp(float W, float H, float S)
-{
-    const TD5_RoamRaceResult *r0 = &R.hm[0].res;
-    const int circ = r0->circuit;
-    const int nfld = r0->nfield > 0 ? r0->nfield : 0;
-    const float bw = 680.0f * S;
-    const float bh = (150.0f + 22.0f * (float)nfld + 46.0f * (float)R.nh + 40.0f) * S;
-    const float bx = (W - bw) * 0.5f, by = (H - bh) * 0.5f;
-    char line[200], t[32], nm[16];
-    float y;
-    int h;
-    qb_rect(bx - 3.0f * S, by - 3.0f * S, bw + 6.0f * S, bh + 6.0f * S, 0xFFFFB400);
-    qb_rect(bx, by, bw, bh, 0xF011161D);
-    tx_c(W * 0.5f, by + 14.0f * S, circ ? "CIRCUIT COMPLETE" : "SPRINT COMPLETE", 0xFFFFB400, 26.0f * S);
-    if (circ) snprintf(line, sizeof line, "%s   %d LAPS   %.2f KM", R.name[0] ? R.name : "UNSAVED ROUTE", R.laps, R.finish_total / 1000.0);
-    else snprintf(line, sizeof line, "%s   %.2f KM", R.name[0] ? R.name : "UNSAVED ROUTE", R.length_m / 1000.0);
-    tx_c(W * 0.5f, by + 50.0f * S, line, 0xFFB8C2CF, 16.0f * S);
-    y = by + 80.0f * S;
-    if (nfld) y = rr_draw_field(r0, -1, 0.0f, W, y, S) + 8.0f * S;
-    for (h = 0; h < R.nh; h++) {
-        const TD5_RoamRaceResult *res = &R.hm[h].res;
-        static const char *const k_ord[] = { "1ST", "2ND", "3RD", "4TH", "5TH", "6TH" };
-        rr_fmt_time(t, sizeof t, res->ticks);
-        if (res->finished)
-            snprintf(line, sizeof line, "%s   %s   %s%s", rr_racer_name(h, nm, sizeof nm),
-                     res->player_rank > 0 ? k_ord[(res->player_rank - 1) % 6] : "-", t, res->new_best ? "   NEW BEST" :
-                     (res->new_best_lap ? "   NEW BEST LAP" : ""));
-        else
-            snprintf(line, sizeof line, "%s   DID NOT FINISH", rr_racer_name(h, nm, sizeof nm));
-        tx_c(W * 0.5f, y, line, rr_name_col(h, -1, 0xFFFFFFFF), 17.0f * S);
-        y += 22.0f * S;
-        rr_splits_line(res, line, sizeof line);
-        tx_c(W * 0.5f, y, line, 0xFFC8D0DA, 13.0f * S);
-        y += 24.0f * S;
-    }
-    tx_c(W * 0.5f, by + bh - 28.0f * S, "ENTER BACK TO THE GENERATOR   F5 RACE AGAIN", 0xFFFFE070, 15.0f * S);
-}
-
 /* the race HUD of human `me` inside the pane (X0, Y0, W, H) */
 static void rr_draw_pane(int me, float X0, float Y0, float W, float H, uint32_t now)
 {
     const RrHuman *hm = &R.hm[me];
     const float S = rr_scale(H);
     char line[160], t[32];
-    if (hm->finished && R.state == TD5_RRACE_RACING) {
-        /* [roam RA] through the line while another human still races: the pane holds its result */
-        static const char *const k_ord[] = { "1ST", "2ND", "3RD", "4TH", "5TH", "6TH" };
-        const float bw = 360.0f * S, bx = X0 + (W - bw) * 0.5f;
-        qb_rect(bx, Y0 + 4.0f * S, bw, 64.0f * S, 0x90000000);
-        rr_fmt_time(t, sizeof t, hm->res.ticks);
-        snprintf(line, sizeof line, "FINISHED %s   %s", hm->res.player_rank > 0 ? k_ord[(hm->res.player_rank - 1) % 6] : "", t);
-        tx_c(X0 + W * 0.5f, Y0 + 8.0f * S, line, 0xFF50E070, 22.0f * S);
-        tx_c(X0 + W * 0.5f, Y0 + 40.0f * S, "WAITING FOR THE OTHER PLAYERS", 0xFFC8D0DA, 14.0f * S);
+    if (hm->finished) {
+        /* [roam RA] through the line while another human still races. [round VE] the pane shows the normal
+         * finishing place (td5_hud.c, the per-viewport finish digit the game captures for it) and the field */
         rr_draw_positions(me, X0, Y0, W, S);
         return;
     }
@@ -1369,10 +1259,8 @@ void td5_roam_race_draw_hud(void)
                 rr_draw_pane(slot, x0, y0, pw, ph, now);
             }
         }
-    } else if (R.state == TD5_RRACE_FINISHED) {
-        if (R.nh <= 1) rr_draw_results(W, H, S);
-        else rr_draw_results_mp(W, H, S);
     }
+    /* [round VE] FINISHED draws nothing: the game runs the normal race end (fade, place, results screen) */
     qb_flush();
     td5_plat_render_set_preset(TD5_PRESET_OPAQUE_LINEAR);
 }

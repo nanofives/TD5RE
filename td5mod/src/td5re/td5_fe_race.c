@@ -750,6 +750,30 @@ int frontend_roam_launch_mp(void)
     return 1;
 }
 
+/* [round VE] The finished city race's post-race menu (td5_frontend.h). */
+static int s_roam_postrace;
+
+void frontend_roam_postrace_begin(void)
+{
+    s_roam_postrace = 1;
+    s_results_rerace_flag = 0;     /* the RACE AGAIN snapshot is this race's car */
+    TD5_LOG_I(LOG_TAG, "RaceResults: free-roam race finished -> results + post-race menu (rerun %s)",
+              td5_roam_handoff_rerun_valid() ? "remembered" : "MISSING");
+}
+
+int frontend_roam_postrace_active(void) { return s_roam_postrace; }
+
+/* RACE AGAIN / SELECT NEW CAR of the city race: arm a new session on the same route. 0 = it could not (the
+ * caller returns to the map the race came from). */
+static int frontend_roam_postrace_rearm(const char *what)
+{
+    const int ok = td5_roam_handoff_rearm();
+    if (ok) s_selected_track = td5_roam_host_track();
+    TD5_LOG_I(LOG_TAG, "RaceResults: free-roam %s -> %s (host track %d)", what,
+              ok ? "same route re-armed" : "re-arm FAILED, back to the map", s_selected_track);
+    return ok;
+}
+
 /* The route the GEOSPATIAL entry races: the geo map's pins when it holds 2..max of them, else the
  * place's last city race (routes/geo_map.json, written by every city race). 0 when neither. */
 static int frontend_geo_entry_route(int slot, double (*ll)[2], int max, char *src, size_t cap)
@@ -3001,6 +3025,10 @@ static int mp_repeat_fire(int p, uint32_t held, uint32_t edge, uint32_t now); /*
 /* [splitscreen back-confirm] Deferred back action for the car-select GRID. */
 static void mp_simul_carsel_back_cb(void) {
     int n = s_num_human_players;
+    if (s_roam_postrace && td5_roam_armed()) {   /* [round VE] backing out of a city race's re-pick drops it */
+        s_roam_postrace = 0;
+        td5_roam_cancel();
+    }
     if (n < 2) n = 2;
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
     mp_simul_carsel_back(n);
@@ -3166,6 +3194,13 @@ static void frontend_mp_simul_carsel_update(void) {
             /* Keep s_mp_simul set so backing here from track select re-enters the
              * car grid (phase 1) with picks intact; the Screen_CarSelection
              * intercept clears it when the MP flow ends. */
+            if (td5_roam_armed() && s_roam_postrace) {
+                /* [round VE] CAR SELECTION from a city race's post-race menu: straight back into its route */
+                s_roam_postrace = 0;
+                TD5_LOG_I(LOG_TAG, "CarSelect grid: all %d ready -> the city race again", n);
+                if (frontend_roam_launch_mp()) return;
+                td5_roam_cancel();
+            }
             TD5_LOG_I(LOG_TAG, "CarSelect grid: all %d ready -> track select", n);
             td5_frontend_set_screen(TD5_SCREEN_TRACK_SELECTION);
             return;
@@ -5516,6 +5551,7 @@ void Screen_MpPostRace(void) {
             frontend_create_button(TR("CAR SELECTION"), BX, y0 + 3 * step, BW, BH);
             frontend_create_button(TR("GAME MODE"),     BX, y0 + 4 * step, BW, BH);
             frontend_create_button(TR("MAIN MENU"),     BX, y0 + 5 * step, BW, BH);
+            if (s_roam_postrace) s_buttons[1].disabled = 1;   /* [round VE] a city race has no View Replay */
         }
         s_selected_button = 0;
         frontend_begin_timed_animation();
@@ -5590,6 +5626,15 @@ void Screen_MpPostRace(void) {
             /* --- Standard MP race --- */
             switch (s_mp_postrace_choice) {
             case 0: /* RACE AGAIN — rematch with the same settings */
+                if (s_roam_postrace) {
+                    /* [round VE] the same city route, split screen, the lobby's cars */
+                    s_roam_postrace = 0;
+                    if (!frontend_roam_postrace_rearm("RACE AGAIN (split screen)") || !frontend_roam_launch_mp()) {
+                        if (td5_roam_armed()) td5_roam_cancel();
+                        td5_frontend_set_screen(td5_frontend_roam_origin_screen());
+                    }
+                    break;
+                }
                 if (s_results_rerace_flag) {
                     s_selected_car          = s_snap_car;
                     s_selected_paint        = s_snap_paint;
@@ -5609,6 +5654,7 @@ void Screen_MpPostRace(void) {
                 frontend_init_race_schedule();
                 break;
             case 1: /* VIEW REPLAY — reuse RaceResults case 1 replay path */
+                if (s_roam_postrace) { s_inner_state = 0; break; }   /* [round VE] greyed: never reached */
                 td5_game_set_demo_mode(0);
                 td5_input_set_replay_mode(1);
                 td5_input_set_playback_active(1);
@@ -5632,6 +5678,12 @@ void Screen_MpPostRace(void) {
                     s_mp_simul = 1;
                     s_mp_phase = 1;
                 }
+                /* [round VE] a city race: the grid's READY launches the same route (the grid's BACK cancels it) */
+                if (s_roam_postrace && !frontend_roam_postrace_rearm("CAR SELECTION (split screen)")) {
+                    s_roam_postrace = 0;
+                    td5_frontend_set_screen(td5_frontend_roam_origin_screen());
+                    break;
+                }
                 TD5_LOG_I(LOG_TAG, "MP post-race: CAR SELECTION -> car grid (simul=%d phase=%d)",
                           s_mp_simul, s_mp_phase);
                 td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
@@ -5643,6 +5695,7 @@ void Screen_MpPostRace(void) {
                 td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
                 break;
             }
+            if (s_mp_postrace_choice != 1 && s_mp_postrace_choice != 3) s_roam_postrace = 0;   /* [round VE] */
         }
         break;
 
@@ -11769,7 +11822,7 @@ void Screen_RaceResults(void) {
              * Once per race — the latch is cleared so re-viewing results is a no-op. */
             if (s_mp_hs_pending) {
                 s_mp_hs_pending = 0;
-                frontend_mp_register_high_scores();
+                if (!s_roam_postrace) frontend_mp_register_high_scores();   /* [round VE] a city race keeps no records */
             }
             if (td5_game_mp_cup_active() && !td5_game_mp_cup_has_next()) {
                 TD5_LOG_I(LOG_TAG, "RaceResults: local MP cup final race -> CUP_WINNERS -> MP post-race menu");
@@ -11827,6 +11880,13 @@ void Screen_RaceResults(void) {
             frontend_create_button(SNK_ViewRaceData,  RR_BX, RR_Y2, RR_BW, RR_BH);
             frontend_create_button(btn3,              RR_BX, RR_Y3, RR_BW, RR_BH);
             frontend_create_button(btn4,              RR_BX, RR_Y4, RR_BW, RR_BH);
+            /* [round VE] a city race has no View Replay: free roam discards the recorder (td5_game.c
+             * "free roam has no View Replay") and its streamed, rebased world is not replayable from inputs */
+            if (s_roam_postrace && s_button_count >= 2) {
+                s_buttons[1].disabled = 1;
+                TD5_LOG_I(LOG_TAG, "RaceResults: free-roam race menu: RACE AGAIN / VIEW REPLAY (greyed) / "
+                          "VIEW RACE DATA / SELECT NEW CAR / QUIT");
+            }
 
             if (is_cup && !next_valid) {
                 s_results_cup_complete = 1;
@@ -11866,6 +11926,14 @@ void Screen_RaceResults(void) {
         if (s_anim_tick >= 0x10) {
             switch (s_results_button) {
             case 0: /* Race Again / Next Cup Race */
+                if (s_roam_postrace) {
+                    /* [round VE] the same city route again, from the grid */
+                    s_roam_postrace = 0;
+                    if (!frontend_roam_postrace_rearm("RACE AGAIN")) {
+                        td5_frontend_set_screen(td5_frontend_roam_origin_screen());
+                        break;
+                    }
+                }
                 if (s_results_rerace_flag) {
                     /* Restore snapshot */
                     s_selected_car = s_snap_car;
@@ -11894,6 +11962,10 @@ void Screen_RaceResults(void) {
                 break;
 
             case 1: /* View Replay */
+                if (s_roam_postrace) {   /* [round VE] greyed for a city race: never reached, stay on the menu */
+                    s_inner_state = 0x0C;
+                    break;
+                }
                 /* [CONFIRMED @ 0x00422F2C case 1 in case 0xF]:
                  *   g_attractModeControlEnabled = 2
                  *   g_inputPlaybackActive = 1
@@ -11963,6 +12035,18 @@ void Screen_RaceResults(void) {
                 return;
 
             case 3: /* Save Race Status / Select New Car */
+                if (s_roam_postrace) {
+                    /* [round VE] car select, then the same city route (its OK launches the armed session,
+                     * its BACK cancels it and returns to the map the race came from) */
+                    s_roam_postrace = 0;
+                    if (!frontend_roam_postrace_rearm("SELECT NEW CAR")) {
+                        td5_frontend_set_screen(td5_frontend_roam_origin_screen());
+                        break;
+                    }
+                    frontend_roam_prepare_car_select();
+                    td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+                    break;
+                }
                 if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
                     s_inner_state = 0x11; /* save cup data */
                 } else {
@@ -12013,7 +12097,13 @@ void Screen_RaceResults(void) {
                      * single-race quit path here only needs the screen jump.
                      * Game types 7 (Drag) and 9 (Drag Race) fall under "cup"
                      * here because the dispatch only special-cases <1, NOT 7/9. */
-                    if (td5_game_mp_cup_active()) {
+                    if (s_roam_postrace) {
+                        /* [round VE] back to where the city race was started, no name entry / records */
+                        s_roam_postrace = 0;
+                        TD5_LOG_I(LOG_TAG, "RaceResults: free-roam QUIT -> screen %d",
+                                  (int)td5_frontend_roam_origin_screen());
+                        td5_frontend_set_screen(td5_frontend_roam_origin_screen());
+                    } else if (td5_game_mp_cup_active()) {
                         if (!td5_game_mp_cup_has_next()) {
                             /* [MP CUP] series finished -> winners/podium screen. */
                             td5_frontend_set_screen(TD5_SCREEN_CUP_WINNERS);
@@ -12722,6 +12812,23 @@ void Screen_CupWon(void) {
 }
 
 #ifndef TD5RE_RELEASE
+/* [round VE 2026-11-09] v12 rows (see td5_frontend.h) */
+int frontend_ve_results_probe(int *inner_state, int *disabled_mask, char *labels, size_t cap)
+{
+    size_t l = 0;
+    int i, mask = 0;
+    if (inner_state) *inner_state = s_inner_state;
+    if (labels && cap) labels[0] = 0;
+    for (i = 0; i < s_button_count && i < FE_MAX_BUTTONS; i++) {
+        if (s_buttons[i].disabled) mask |= 1 << i;
+        if (labels && l < cap)
+            l += (size_t)snprintf(labels + l, cap - l, "%s%s%s%s", i ? " / " : "", s_buttons[i].label,
+                                  s_buttons[i].disabled ? "(grey)" : "", i == s_selected_button ? "*" : "");
+    }
+    if (disabled_mask) *disabled_mask = mask;
+    return s_button_count;
+}
+
 /* [round UE 2026-11-08] ue-hidden-rows (see td5_frontend.h). Runs from the selftest
  * verdict, off any menu: it rebuilds button sets into s_buttons, so it snapshots and
  * restores the whole button table and every selector flag it changes. */

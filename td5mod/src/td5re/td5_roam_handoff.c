@@ -19,6 +19,7 @@
 #include "td5_roam_race.h"
 #include "td5_roam_ai.h"
 #include "td5_roam_handoff.h"
+#include "td5re.h"                /* [round VE] g_td5.car_index */
 #include "deps/cjson/cJSON.h"
 
 #define LOG_TAG "roam"
@@ -159,6 +160,68 @@ void td5_roam_handoff_frame(void)
         else
             TD5_LOG_I(LOG_TAG, "HANDOFF: race started %u ms after the session's first frame", (unsigned)(td5_plat_time_ms() - H.t_active));
     }
+}
+
+/* ============================================================ RACE AGAIN [round VE] ===== */
+
+static struct {
+    int    valid;
+    double ll[TD5_ROUTE_MAX_WP][2];
+    int    n, type, laps;
+    int    opponents, traffic, cops;
+} s_rerun;
+
+int td5_roam_handoff_capture_rerun(void)
+{
+    const int n = td5_roam_route_wp_count();
+    TD5_RoamRaceSetup su;
+    int i;
+    if (n < 2 || n > TD5_ROUTE_MAX_WP) {
+        TD5_LOG_W(LOG_TAG, "RERUN: nothing to remember (%d waypoint(s))", n);
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        const TD5_RouteWp *w = td5_roam_route_wp(i);
+        if (!w) return 0;
+        s_rerun.ll[i][0] = w->lat;
+        s_rerun.ll[i][1] = w->lon;
+    }
+    td5_roam_race_setup_get(&su);
+    s_rerun.n = n;
+    s_rerun.type = td5_roam_route_type() == TD5_ROUTE_CIRCUIT ? TD5_ROUTE_CIRCUIT : TD5_ROUTE_SPRINT;
+    s_rerun.laps = s_rerun.type == TD5_ROUTE_CIRCUIT ? td5_roam_route_laps() : 1;
+    s_rerun.opponents = su.opponents;
+    s_rerun.traffic = su.traffic;
+    s_rerun.cops = su.cops;
+    s_rerun.valid = 1;
+    TD5_LOG_I(LOG_TAG, "RERUN: remembered %d waypoint(s) from %.6f,%.6f, %s laps=%d opponents=%d traffic=%d cops=%d",
+              n, s_rerun.ll[0][0], s_rerun.ll[0][1], s_rerun.type == TD5_ROUTE_CIRCUIT ? "circuit" : "sprint",
+              s_rerun.laps, su.opponents, su.traffic, su.cops);
+    return 1;
+}
+
+int td5_roam_handoff_rerun_valid(void) { return s_rerun.valid; }
+
+int td5_roam_handoff_rearm(void)
+{
+    TD5_RoamSpawn sp;
+    if (!s_rerun.valid) return 0;
+    memset(&sp, 0, sizeof sp);
+    if (!td5_roam_place_for_latlon(s_rerun.ll[0][0], s_rerun.ll[0][1], sp.place, sizeof sp.place, &sp.spawn_px, &sp.spawn_pz)) {
+        TD5_LOG_W(LOG_TAG, "RERUN: START %.6f,%.6f is outside every city map", s_rerun.ll[0][0], s_rerun.ll[0][1]);
+        return 0;
+    }
+    sp.spawn_yaw = -1;
+    sp.car_index = g_td5.car_index;   /* td5_roam_session_start takes the race's car anyway */
+    td5_roam_begin(&sp);
+    if (!td5_roam_handoff_set((const double (*)[2])s_rerun.ll, s_rerun.n, s_rerun.type, s_rerun.laps,
+                              TD5_HANDOFF_AUTOSTART, s_rerun.opponents, s_rerun.traffic, s_rerun.cops)) {
+        td5_roam_cancel();
+        return 0;
+    }
+    TD5_LOG_I(LOG_TAG, "RERUN: armed %s at %.6f,%.6f with the same route (%d waypoint(s))", sp.place,
+              s_rerun.ll[0][0], s_rerun.ll[0][1], s_rerun.n);
+    return 1;
 }
 
 int td5_roam_handoff_read_waypoints(const char *path, double (*ll)[2], int max)

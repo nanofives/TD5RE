@@ -43,6 +43,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <math.h>     /* [round VE] fabs */
 
 #include "td5re.h"
 #include "td5_types.h"
@@ -267,6 +268,13 @@ typedef struct {
      * (black = shadowed, white = lit). PASS when a sane share of the receivers is shadowed AND those pixels
      * really got darker than the lit ones (the pass used to be dispatched yet multiply by 1.0). */
     int ug_check;
+    /* [round VE 2026-11-09] item 12, a free-roam race ends like a normal race (roam sprint rows, natural end:
+     * no end hold, the sprint test stops at the line): 12 = after the line the race fades out (frames of the
+     * place / star / fade), lands on the RESULTS screen whose table holds the race's own time and place,
+     * OK leads to the post-race menu (5 entries, VIEW REPLAY greyed), RACE AGAIN re-runs the SAME route
+     * (same hash + length) up to GO. Frontend frames of the table and the menu. Needs TD5RE_D3D12_CAPTURE=1
+     * for the frames (the verdict does not). */
+    int ve_check;
 } RaceScenario;
 
 /* Plaza Moreno, La Plata (the lawn between the cathedral and the town hall) */
@@ -719,6 +727,15 @@ static const RaceScenario k_races[] = {
     { .name="ug-shadow-visible-2p",        .track=3,  .car=-1, .game_type=0, .player_is_ai=1,
       .traffic=0, .difficulty=0, .checkpoint_timers=0, .car_damage=0,
       .lane_assist=0, .auto_gearbox=1, .mp_mode=0, .mp_ai_players=1, .depth=ST_DEPTH_RUN_5S, .ff=1, .ug_check=1 },
+    /* [round VE 2026-11-09] item 12: free-roam races finish like normal races. Solo smoke sprint (1st: the star),
+     * then the smoke sprint with 5 AI (a place among the field, the AI still on the road get estimated times).
+     * FF 1 so the fade and the star run at their real speed. Full suite only; run alone with TD5RE_SELFTEST_ROWS. */
+    { .name="v12-roam-finish-menu",        .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0, .mp_mode=-1,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .ff=1, .roam=4, .depth=ST_DEPTH_ROAM_SPRINT, .ve_check=12 },
+    { .name="v12-roam-finish-field",       .track=0,  .car=-1, .game_type=0, .player_is_ai=0,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0, .mp_mode=-1,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .ff=1, .roam=6, .depth=ST_DEPTH_ROAM_SPRINT, .ve_check=12 },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
 static int s_t3_max_lap;   /* [round TA] t3-laps-shipped: highest lap the player completed */
@@ -820,7 +837,8 @@ typedef enum {              /* sub-state within one step */
     SS_RACE_WAIT_START,     /* auto_race armed; wait for GAMESTATE_RACE */
     SS_RACE_RUNNING,        /* sample frames until the tick budget is spent */
     SS_RACE_WAIT_MENU,      /* fade-out in flight; wait for GAMESTATE_MENU */
-    SS_RACE_POST_MENU       /* teardown settle frames, then record the row */
+    SS_RACE_POST_MENU,      /* teardown settle frames, then record the row */
+    SS_VE_FLOW              /* [round VE] v12 rows: results screen -> menu -> RACE AGAIN -> GO -> exit */
 } SubState;
 
 static int       s_active;
@@ -1167,6 +1185,7 @@ static void st_roam_arm(const RaceScenario *sc)
         td5_roam_sprint_route_waypoints(mode, ll, 8);
         td5_roam_sprint_test_arm(mode);
         if (sc->roam >= 18 && sc->roam <= 21) td5_roam_sprint_test_set_humans(1 + sc->mp_ai_players);   /* [roam RA] */
+        if (sc->ve_check) td5_roam_sprint_test_set_natural_end(1);   /* [round VE] the normal race end at once */
         if (!td5_roam_selftest_arm(ll[0][0], ll[0][1])) {
             s_roam_captured = 1;
             s_roam_status = ST_FAIL;
@@ -3204,6 +3223,177 @@ static void st_tick_screens(uint32_t now)
     }
 }
 
+/* ============================================================ [round VE] v12 rows ===== */
+static struct {
+    int      done, status, phase;
+    char     note[120];
+    uint32_t fin_ms, t0, phase_ms;
+    long     ticks;            /* the race's time at the line (30 Hz ticks) */
+    uint32_t hash;
+    double   len;
+    int      rank;             /* 1-based, 0 = solo */
+    int      shots;            /* bit per in-race frame taken */
+    int      settle, key_rel;
+    int32_t  prim; int fpos;   /* what the results screen holds for slot 0 */
+    char     labels[160];
+    int      nbtn, dmask;
+    char     tag[8];
+} s_ve;
+
+static void st_ve_shot(const char *what)
+{
+    char path[512];
+    const char *dir = td5_plat_log_dir();
+    snprintf(path, sizeof path, "%sv12_%s_%s.png", dir ? dir : "", s_ve.tag, what);
+    td5_plat_request_frame_dump(path);
+    TD5_LOG_I(LOG_TAG, "v12: frame dump %s", path);
+}
+
+static void st_ve_reset(const RaceScenario *sc)
+{
+    memset(&s_ve, 0, sizeof s_ve);
+    snprintf(s_ve.tag, sizeof s_ve.tag, "%s", sc && sc->roam == 6 ? "field" : "solo");
+}
+
+/* in race: the finish data, then frames of the place / star / fade */
+static void st_ve_race_frame(const RaceScenario *sc, uint32_t now)
+{
+    static const uint32_t k_at[5] = { 150, 400, 900, 1600, 2900 };
+    static const char *const k_nm[5] = { "1_finish_150ms", "2_place_400ms", "3_900ms", "4_1600ms", "5_2900ms" };
+    int i;
+    if (!s_ve.tag[0]) st_ve_reset(sc);
+    if (s_ve.done || g_td5.game_state != TD5_GAMESTATE_RACE || !td5_roam_active()) return;
+    if (!s_ve.fin_ms && td5_roam_race_state() == TD5_RRACE_FINISHED) {
+        const TD5_RoamRaceResult *r = td5_roam_race_result();
+        s_ve.fin_ms = now;
+        s_ve.ticks = r->ticks; s_ve.hash = r->hash; s_ve.len = r->length_m; s_ve.rank = r->player_rank;
+        TD5_LOG_I(LOG_TAG, "v12: race finished, %ld ticks, route %08X %.1f m, place %d", s_ve.ticks,
+                  (unsigned)s_ve.hash, s_ve.len, s_ve.rank);
+    }
+    if (!s_ve.fin_ms) return;
+    for (i = 0; i < 5; i++)
+        if (!(s_ve.shots & (1 << i)) && now - s_ve.fin_ms >= k_at[i]) { s_ve.shots |= 1 << i; st_ve_shot(k_nm[i]); }
+}
+
+static void st_ve_fail(const char *why)
+{
+    s_ve.status = ST_FAIL;
+    snprintf(s_ve.note, sizeof s_ve.note, "v12: %s", why);
+    TD5_LOG_W(LOG_TAG, "v12: FAIL %s", why);
+    if (g_td5.game_state == TD5_GAMESTATE_RACE) td5_game_selftest_end_race();
+    s_ve.phase = 5;
+    s_ve.phase_ms = td5_plat_time_ms();
+}
+
+static void st_ve_begin(uint32_t now)
+{
+    if (!s_ve.tag[0]) st_ve_reset(NULL);
+    s_ve.t0 = now;
+    s_ve.phase = 0;
+    s_ve.phase_ms = now;
+    td5_frontend_harness_force_input(1);
+    if (!s_ve.fin_ms) st_ve_fail("the race never reached FINISHED");
+}
+
+/* Press the focused-to-be button `btn` of the current screen (the StartScreen walker's way: focus, ENTER). */
+static void st_ve_press(int btn)
+{
+    td5_frontend_harness_select(btn);
+    td5_plat_input_inject_key(0x1C, 1);
+    s_ve.key_rel = 3;
+}
+
+/* 1 when the flow is over (the row then records) */
+static int st_ve_tick(uint32_t now)
+{
+    int inner = -1;
+    char why[120];
+    if (s_ve.key_rel > 0 && --s_ve.key_rel == 0) td5_plat_input_inject_key(0x1C, 0);
+    frontend_ve_results_probe(&inner, NULL, NULL, 0);
+    switch (s_ve.phase) {
+    case 0:   /* the race's fade landed on the results screen */
+        if (td5_frontend_get_screen() == TD5_SCREEN_RACE_RESULTS) {
+            s_ve.prim = td5_game_get_result_primary(0);
+            s_ve.fpos = td5_game_get_finish_position(0);
+            TD5_LOG_I(LOG_TAG, "v12: RESULTS screen %u ms after the race: slot 0 time %d (race %ld), place %d (race %d)",
+                      (unsigned)(now - s_ve.t0), (int)s_ve.prim, s_ve.ticks, s_ve.fpos + 1, s_ve.rank);
+            s_ve.phase = 1; s_ve.phase_ms = now; s_ve.settle = 0;
+        } else if (now - s_ve.phase_ms > 15000u) {
+            snprintf(why, sizeof why, "no RESULTS screen after the race (screen %d)", (int)td5_frontend_get_screen());
+            st_ve_fail(why);
+        }
+        break;
+    case 1:   /* the table, interactive: frame, then OK */
+        if (inner == 6 && td5_frontend_harness_ready()) {
+            if (++s_ve.settle == 30) st_ve_shot("6_stats");
+            if (s_ve.settle == 45) { st_ve_press(1); s_ve.phase = 2; s_ve.phase_ms = now; s_ve.settle = 0; }
+        } else if (now - s_ve.phase_ms > 15000u) {
+            snprintf(why, sizeof why, "results table never interactive (inner state %d)", inner);
+            st_ve_fail(why);
+        }
+        break;
+    case 2:   /* the post-race menu: frame, its buttons, then RACE AGAIN */
+        if (inner == 0x0F && td5_frontend_harness_ready()) {
+            if (++s_ve.settle == 30) {
+                st_ve_shot("7_menu");
+                s_ve.nbtn = frontend_ve_results_probe(NULL, &s_ve.dmask, s_ve.labels, sizeof s_ve.labels);
+                TD5_LOG_I(LOG_TAG, "v12: post-race menu %d button(s): %s (disabled mask 0x%X)", s_ve.nbtn, s_ve.labels,
+                          (unsigned)s_ve.dmask);
+            }
+            if (s_ve.settle == 45) { st_ve_press(0); s_ve.phase = 3; s_ve.phase_ms = now; }
+        } else if (now - s_ve.phase_ms > 15000u) {
+            snprintf(why, sizeof why, "post-race menu never up (inner state %d)", inner);
+            st_ve_fail(why);
+        }
+        break;
+    case 3:   /* RACE AGAIN: a new roam session on the same route reaches its grid */
+        if (g_td5.game_state == TD5_GAMESTATE_RACE && td5_roam_active() && td5_roam_race_state() >= TD5_RRACE_COUNTDOWN) {
+            const TD5_RoamRaceResult *r = td5_roam_race_result();
+            TD5_LOG_I(LOG_TAG, "v12: RACE AGAIN -> race on route %08X %.1f m (first race %08X %.1f m) %u ms after the press",
+                      (unsigned)r->hash, r->length_m, (unsigned)s_ve.hash, s_ve.len, (unsigned)(now - s_ve.phase_ms));
+            if (r->hash != s_ve.hash || fabs(r->length_m - s_ve.len) > 0.5) {
+                snprintf(why, sizeof why, "RACE AGAIN raced another route (%08X %.1f m, was %08X %.1f m)",
+                         (unsigned)r->hash, r->length_m, (unsigned)s_ve.hash, s_ve.len);
+                st_ve_fail(why);
+                break;
+            }
+            s_ve.phase = 4; s_ve.phase_ms = now;
+        } else if (now - s_ve.phase_ms > 120000u) {
+            snprintf(why, sizeof why, "RACE AGAIN never reached the grid (state %d, roam %d, race %d)",
+                     (int)g_td5.game_state, td5_roam_active(), td5_roam_race_state());
+            st_ve_fail(why);
+        }
+        break;
+    case 4:   /* ... and its GO */
+        if (td5_roam_race_state() == TD5_RRACE_RACING) {
+            const int okt = s_ve.prim == (int32_t)s_ve.ticks;
+            const int okp = s_ve.fpos == (s_ve.rank > 0 ? s_ve.rank - 1 : 0);
+            const int okm = s_ve.nbtn == 5 && (s_ve.dmask & ~2) == 0 && (s_ve.dmask & 2);
+            st_ve_shot("8_again_go");
+            s_ve.status = (okt && okp && okm) ? ST_PASS : ST_FAIL;
+            snprintf(s_ve.note, sizeof s_ve.note, "%s: t %d/%ld%s p%d/%d%s, %d btn%s, AGAIN same route GO",
+                     s_ve.tag, (int)s_ve.prim, s_ve.ticks, okt ? "" : " BAD", s_ve.fpos + 1, s_ve.rank > 0 ? s_ve.rank : 1,
+                     okp ? "" : " BAD", s_ve.nbtn, okm ? " replay grey" : " BAD MENU");
+            TD5_LOG_I(LOG_TAG, "v12: verdict %s: %s | menu: %s", s_ve.status == ST_PASS ? "PASS" : "FAIL", s_ve.note,
+                      s_ve.labels);
+            td5_game_selftest_end_race();
+            s_ve.phase = 5; s_ve.phase_ms = now;
+        } else if (now - s_ve.phase_ms > 30000u) {
+            st_ve_fail("RACE AGAIN never reached GO");
+        }
+        break;
+    default:  /* back in the menus */
+        if (g_td5.game_state == TD5_GAMESTATE_MENU || now - s_ve.phase_ms > 30000u) {
+            if (s_ve.key_rel > 0) td5_plat_input_inject_key(0x1C, 0);
+            td5_frontend_harness_force_input(0);
+            s_ve.done = 1;
+            return 1;
+        }
+        break;
+    }
+    return 0;
+}
+
 static void st_tick_races(uint32_t now)
 {
     const RaceScenario *sc = st_race_at(s_step);
@@ -3224,6 +3414,7 @@ static void st_tick_races(uint32_t now)
         row = st_new_row(sc->name, 'R');
         if (row) row->repeat_group = sc->repeat_group;
         st_apply_scenario(sc);
+        if (sc->ve_check) st_ve_reset(sc);           /* [round VE] */
         if (sc->human_drive > 0) st_drive_arm(sc);   /* [R1026 K] after apply: it forces auto_throttle OFF */
         if (sc->roam > 0) st_roam_arm(sc);           /* [roam F2-D] after apply: auto_throttle OFF + roam session */
         if (sc->laps_menu > 0 && !sc->roam)          /* [round TA] t3-laps-shipped laps a circuit: the AI drives it */
@@ -3269,11 +3460,16 @@ static void st_tick_races(uint32_t now)
         if (g_td5.game_state == TD5_GAMESTATE_MENU) {
             s_settle_frames = 0;
             s_sub = SS_RACE_POST_MENU;
+            if (sc->ve_check && !s_ve.done) { st_ve_begin(now); s_sub = SS_VE_FLOW; }   /* [round VE] */
         } else if ((int32_t)(now - s_step_deadline_ms) >= 0) {
             st_finish_row(row, ST_FAIL, "race exit never completed (timeout)");
             st_reset_scenario_fields();
             st_next_step();
         }
+        break;
+
+    case SS_VE_FLOW:   /* [round VE] */
+        if (st_ve_tick(now)) { s_settle_frames = 0; s_sub = SS_RACE_POST_MENU; }
         break;
 
     case SS_RACE_POST_MENU:
@@ -3333,6 +3529,11 @@ static void st_tick_races(uint32_t now)
                         snprintf(note, sizeof(note),
                                  "natural finish did not reach results screen");
                     }
+                }
+                /* [round VE] v12 rows: the flow's verdict replaces the sprint script's (which only drove to the line) */
+                if (sc->ve_check) {
+                    status = invstatus > s_ve.status ? invstatus : s_ve.status;
+                    snprintf(note, sizeof(note), "%s", s_ve.note);
                 }
                 /* [round UB] u-row verdicts */
                 if (sc->u_check && status < ST_FAIL) {
@@ -3576,6 +3777,7 @@ static void st_tick_races(uint32_t now)
         } else if (!sc->trace_golden) {
             g_td5.ini.trace_fast_forward = s_scenario_ff;
         }
+        if (sc->ve_check) st_ve_race_frame(sc, now);   /* [round VE] the finish: data + frames */
         /* [roam F2-D] judge the scripted drive while the provider's counters still exist */
         if (sc->roam > 0 && !s_roam_captured &&
             (st_roam_done() || tick - s_race_start_tick >= s_race_budget ||
@@ -3585,7 +3787,7 @@ static void st_tick_races(uint32_t now)
             /* Natural finish (or knockout): the fade already returned us. */
             s_sub = SS_RACE_WAIT_MENU;
         } else if (!sc->natural_finish &&
-                   (tick - s_race_start_tick >= s_race_budget || (sc->roam > 0 && st_roam_done()) ||
+                   (tick - s_race_start_tick >= s_race_budget || (sc->roam > 0 && !sc->ve_check && st_roam_done()) ||
                     (sc->police > 0 && td5_police_test_done()))) {
             td5_game_selftest_end_race();
             s_step_deadline_ms = now + 30000u;

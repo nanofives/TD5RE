@@ -59,6 +59,11 @@ TD5_ScreenIndex td5_frontend_get_screen(void);
 /* [roam QA] The map screen the armed / running free-roam session came from (the FREE ROAM setup or
  * the SPRINT / CIRCUIT screen): where leaving free roam, or BACK out of its car select, returns. */
 TD5_ScreenIndex td5_frontend_roam_origin_screen(void);
+/* [round VE] td5_game.c: the race that just ended was a FINISHED free-roam race. The results screen and its
+ * post-race menu then serve the city race (no high scores, VIEW REPLAY greyed, RACE AGAIN / SELECT NEW CAR
+ * re-arm the same route, QUIT returns to td5_frontend_roam_origin_screen). Cleared by the menu's choice. */
+void frontend_roam_postrace_begin(void);
+int  frontend_roam_postrace_active(void);
 
 /* --- Test-harness hooks (StartScreen nav walker / scripted-input engine) ---
  * force_input: acquire(1)/release(0) — treat the window as focused so injected
@@ -139,6 +144,9 @@ int  frontend_ue_rows_selftest(char *note, size_t cap);
  * rolled through the real launch entry (independent rolls, pools, fixed and AI
  * seats untouched, cop-chase roles, the pane ring). 0 = pass, 1 = fail. */
 int  frontend_uf_mp_random_selftest(char *note, size_t cap);
+/* [round VE 2026-11-09] v12 rows: the results screen's inner state, its buttons' labels ("A / B(grey) / C*",
+ * * = focused) and a mask of the disabled ones. Returns the button count. */
+int  frontend_ve_results_probe(int *inner_state, int *disabled_mask, char *labels, size_t cap);
 #endif
 
 /* [SELECTABLE HORNS] Horn catalogue id chosen by local player `player`, or ""
