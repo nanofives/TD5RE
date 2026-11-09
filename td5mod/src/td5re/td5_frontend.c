@@ -272,6 +272,27 @@ uint32_t s_anim_start_ms = 0;
 static uint32_t s_anim_elapsed_ms = 0;
 int  s_anim_complete = 0;
 static float s_anim_t = 0.0f;          /* continuous 0..1 for smooth button position */
+/* [round VA 2026-11-09] Mariano: "during menu animations when entering from one
+ * menu to the other (not coming back) for a frame the menu goes back and then
+ * disappears". The button / title slide is a function of (screen, inner state):
+ * frontend_get_button_anim_state maps only the states that ANIMATE. Many screens
+ * finish a slide in a state and switch to the next state, which is not mapped,
+ * one frame (or a whole wipe) before they settle or leave:
+ *   - slide-OUT done, then an unmapped exit state (OPTIONS 8 -> 9, every options
+ *     sub-screen, TRACK SELECT 7 -> 8, AUTO TRACK OPTIONS, CAR SELECT 0x18 ->
+ *     0x19 wipe -> 0x1A): s_anim_complete is still 1, so the OLD buttons and
+ *     title were drawn back AT REST until set_screen (1 frame, ~8 on car select);
+ *   - slide-IN done, then an unmapped "settle" state (RACE TYPE 1 -> 2, SELECT
+ *     CUP 7 -> 8): s_anim_complete is still 0, so the "before the intro" guard
+ *     put the NEW buttons and title back OFF-SCREEN for one frame.
+ * These two latches remember that a slide ran to its end, so the unmapped state
+ * after it keeps the slide's end pose: gone after an OUT, at rest after an IN.
+ * Set by frontend_note_anim_end (frontend_update_timed_animation at t >= 1 in a
+ * mapped IN / OUT state), cleared by set_screen, frontend_reset_buttons and
+ * frontend_create_button (new buttons start from the screen's own rules). */
+static int s_fe_slide_in_done  = 0;
+static int s_fe_slide_out_done = 0;
+static void frontend_note_anim_end(void);
 static TD5_ScreenIndex s_previous_screen = (TD5_ScreenIndex)-1;
 
 /* Context / flow tracking (DAT_004962d4) */
@@ -1532,6 +1553,7 @@ float frontend_update_timed_animation(int max_tick, uint32_t duration_ms) {
 
     if (duration_ms == 0) {
         s_anim_tick = max_tick;
+        frontend_note_anim_end();
         return 1.0f;
     }
 
@@ -1539,6 +1561,7 @@ float frontend_update_timed_animation(int max_tick, uint32_t duration_ms) {
     s_anim_tick = (int)(t * (float)max_tick + 0.5f);
     if (s_anim_tick > max_tick) s_anim_tick = max_tick;
     s_anim_t = t;
+    if (t >= 1.0f) frontend_note_anim_end();
     return t;
 }
 
@@ -1568,7 +1591,7 @@ static int frontend_screen_substate(TD5_ScreenIndex screen, const char **out_lab
         lbl = (s_inner_state == 15) ? "MORE STATS" : "SELECT CAR";
         break;
     case TD5_SCREEN_RACE_RESULTS:
-        if (td5_game_mp_cop_chase_active()) { sub = 2; lbl = "CHASE RESULTS"; }
+        if (td5_game_is_wanted_mode()) { sub = 2; lbl = "CHASE RESULTS"; }   /* [round VC] SP too */
         else if (td5_game_mp_cup_active() && g_td5.num_human_players >= 2) {
             sub = 1; lbl = "CUP RESULTS";
         } else { sub = 0; lbl = "RESULTS"; }
@@ -1665,7 +1688,7 @@ static const char *frontend_get_title_text_for_screen(TD5_ScreenIndex screen) {
      * CHASE renders its own COPS/SUSPECTS table and reads "CHASE RESULTS".
      * Plain races keep "RESULTS". [MP COP CHASE RESULTS 2026-06-25] */
     case TD5_SCREEN_RACE_RESULTS:
-        if (td5_game_mp_cop_chase_active()) return "CHASE RESULTS";
+        if (td5_game_is_wanted_mode()) return "CHASE RESULTS";   /* [round VC] SP cop chase too */
         return (td5_game_mp_cup_active() && g_td5.num_human_players >= 2)
                ? "CUP RESULTS" : "RESULTS";
     case TD5_SCREEN_MP_LOBBY:           return "MULTIPLAYER";
@@ -2890,6 +2913,7 @@ void frontend_reset_buttons(void) {
     s_button_count = 0;
     s_auto_button_idx = 0;
     s_selected_button = 0;
+    s_fe_slide_in_done = s_fe_slide_out_done = 0;   /* [round VA] */
     s_selection_from_mouse = 0;
     s_button_index = -1;
     s_mouse_confirm_button = -1;
@@ -3261,6 +3285,7 @@ void td5_frontend_selftest_nav_result(int *screen, int *reached, int *navigable)
  *     absolute placement in 640x480 virtual coords.
  */
 int frontend_create_button(const char *label, int x, int y, int w, int h) {
+    s_fe_slide_in_done = s_fe_slide_out_done = 0;   /* [round VA] new buttons: the screen's own rules */
     for (int i = 0; i < FE_MAX_BUTTONS; i++) {
         if (!s_buttons[i].active) {
             s_buttons[i].active = 1;
@@ -5757,6 +5782,7 @@ void td5_frontend_set_screen(TD5_ScreenIndex index) {
     s_anim_start_ms = 0;
     s_anim_elapsed_ms = 0;
     s_anim_complete = 0;
+    s_fe_slide_in_done = s_fe_slide_out_done = 0;   /* [round VA] */
     /* Force a few opaque backbuffer clears so no stale RACE frame lingering in
      * the flip-model swapchain bleeds through the incoming screen (see
      * s_fe_entry_clear_frames). 4 covers a 2-3 buffer swapchain with margin. */
@@ -6096,6 +6122,39 @@ static int frontend_shared_nav_owner_device(void) {
     return s_mp_join_device[0];
 }
 
+#ifndef TD5RE_RELEASE
+/* [round VA 2026-11-09] item 1 probe: TD5RE_FE_TRANSITION_PROBE=1 stamps every
+ * frontend frame with what it drew (screen, inner state, anim complete, anim t,
+ * button count, button 0's drawn x, title y) as small text in the bottom-left
+ * corner AND as one frontend.log line, so a per-frame framedump sequence
+ * (TD5RE_FRAMEDUMP=<path %05d>, TD5RE_FRAMEDUMP_EVERY=1) labels itself. Off by
+ * default; costs one getenv once. */
+static float frontend_get_title_render_y(float sy);
+void frontend_get_button_render_rect(int button_index, float sx, float sy,
+                                     float *out_x, float *out_y, float *out_w, float *out_h);
+static void frontend_transition_probe(void) {
+    static int on = -1;
+    static uint32_t n;
+    char line[160];
+    int sw = 0, sh = 0, b0 = -1, i;
+    float bx = 0.0f, by = 0.0f, bw = 0.0f, bh = 0.0f, sx, sy;
+    if (on < 0) on = td5_env_int("TD5RE_FE_TRANSITION_PROBE", 0, 0, 1);
+    if (!on) return;
+    td5_plat_get_window_size(&sw, &sh);
+    if (sw <= 0 || sh <= 0) return;
+    sx = (float)sw / 640.0f; sy = (float)sh / 480.0f;
+    for (i = 0; i < s_button_count; i++)
+        if (s_buttons[i].active && !s_buttons[i].hidden) { b0 = i; break; }
+    if (b0 >= 0) frontend_get_button_render_rect(b0, sx, sy, &bx, &by, &bw, &bh);
+    snprintf(line, sizeof line, "F%u P%u S%d ST%d C%d T%.3f K%d N%d B%d X%.0f TY%.0f",
+             (unsigned)n++, (unsigned)td5_plat_present_count(), (int)s_current_screen, s_inner_state,
+             s_anim_complete, (double)s_anim_t, s_anim_tick, s_button_count, b0,
+             b0 >= 0 ? (double)(bx / sx) : -9999.0, (double)(frontend_get_title_render_y(sy) / sy));
+    fe_draw_small_text(4.0f * sx, 466.0f * sy, line, 0xFFFFFF00u, sx, sy);
+    TD5_LOG_I(LOG_TAG, "FE-PROBE %s", line);
+}
+#endif
+
 int td5_frontend_display_loop(void) {
     if (g_td5.ini.log_frontend_draw) s_fe_draw_log_frame++;
     td5_profile_begin_frame();
@@ -6186,6 +6245,9 @@ int td5_frontend_display_loop(void) {
 
     /* 4. Render flush (cursor queued after all other UI) */
     td5_frontend_render_ui_rects();
+#ifndef TD5RE_RELEASE
+    frontend_transition_probe();   /* [round VA] TD5RE_FE_TRANSITION_PROBE=1: per-frame screen/state stamp */
+#endif
     frontend_render_cursor();
     td5_frontend_flush_sprite_blits();
     td5_profile_mark("fe_render");
@@ -6636,6 +6698,20 @@ static int frontend_get_button_anim_state(int *out_mode, int *out_tick, int *out
     return (mode != FE_BUTTON_ANIM_NONE && max_tick > 0) ? 1 : 0;
 }
 
+/* [round VA] A timed animation reached t >= 1: if the current (screen, state) is
+ * a mapped button slide, latch which one ended (see s_fe_slide_in_done). */
+static void frontend_note_anim_end(void) {
+    int mode = FE_BUTTON_ANIM_NONE;
+#ifndef TD5RE_RELEASE
+    static int latch = -1;   /* dev A/B: TD5RE_FE_SLIDE_LATCH=0 = the old one-frame flash */
+    if (latch < 0) latch = td5_env_int("TD5RE_FE_SLIDE_LATCH", 1, 0, 1);
+    if (!latch) return;
+#endif
+    if (!frontend_get_button_anim_state(&mode, NULL, NULL)) return;
+    if (mode == FE_BUTTON_ANIM_IN)  { s_fe_slide_in_done = 1; s_fe_slide_out_done = 0; }
+    if (mode == FE_BUTTON_ANIM_OUT) { s_fe_slide_out_done = 1; s_fe_slide_in_done = 0; }
+}
+
 /* Returns 1 if the current screen has timed button slide-in/out animations. */
 static int frontend_screen_has_button_anim(void) {
     switch (frontend_effective_screen(s_current_screen)) {
@@ -6719,10 +6795,16 @@ static float frontend_get_button_anim_x(int button_index, float base_x) {
     }
 
     if (!frontend_get_button_anim_state(&mode, &tick, &max_tick)) {
+        /* [round VA] A slide-out ran to its end: the buttons stay gone until the
+         * screen leaves (or creates new buttons), never back at rest. */
+        if (s_fe_slide_out_done)
+            return offscreen_x;
         /* Before the intro animation completes, keep buttons at their off-screen
          * starting position. This prevents a one-frame flash of the final button
-         * layout before the slide-in animation begins. */
-        if (!s_anim_complete && frontend_screen_has_button_anim())
+         * layout before the slide-in animation begins. [round VA] Only BEFORE
+         * the slide-in: once it ran to its end the buttons are at rest even if
+         * the screen sets s_anim_complete a state later. */
+        if (!s_anim_complete && !s_fe_slide_in_done && frontend_screen_has_button_anim())
             return offscreen_x;
         return base_x;
     }
@@ -6780,8 +6862,11 @@ static float frontend_get_title_render_y(float sy) {
     float t;
 
     if (!frontend_get_button_anim_state(&mode, &tick, &max_tick)) {
-        /* Mirror button guard: keep title hidden before slide-in anim starts */
-        if (!s_anim_complete && frontend_screen_has_button_anim())
+        /* Mirror button guard: keep title hidden before slide-in anim starts
+         * [round VA] and after a slide-out ran to its end. */
+        if (s_fe_slide_out_done)
+            return hidden_y * sy;
+        if (!s_anim_complete && !s_fe_slide_in_done && frontend_screen_has_button_anim())
             return hidden_y * sy;
         return base_y * sy;
     }
@@ -8309,17 +8394,12 @@ static void frontend_render_car_selection_preview(float sx, float sy) {
         int show_paint = (s_color_panel_visible || s_paint_active) && !s_car_random &&
                          frontend_paint_overlay_visible(actual_car,
                                                         (uint32_t)g_td5.ini.td6_paint_color);
-        if (s_inner_state == 11 && s_car_random_outgoing) {
-            /* [round UB] RANDOM's "?" card slides out like a car */
-            float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 433.0f);
-            frontend_draw_random_card(232.0f + 408.0f * t + 20.0f, 134.0f, 368.0f, 260.0f, sx, sy);
-        } else if (s_car_random && s_inner_state == 14) {
-            float t = frontend_clamp01((float)(td5_plat_time_ms() - s_anim_start_ms) * 2.0f / 800.0f);
-            frontend_draw_random_card(1832.0f - 1600.0f * t + 20.0f, 134.0f, 368.0f, 260.0f, sx, sy);
-        } else if (s_car_random && s_inner_state != 11) {
-            /* [round UB] the RANDOM entry: a "?" card where the car picture goes */
-            if (s_inner_state >= 6 && s_inner_state != 12 && s_inner_state != 13)
-                frontend_draw_random_card(252.0f, 134.0f, 368.0f, 260.0f, sx, sy);
+        if ((s_inner_state == 11 && s_car_random_outgoing) ||
+            (s_car_random && s_inner_state != 11)) {
+            /* [round VA 2026-11-09] the RANDOM entry draws NO picture (Mariano:
+             * "delete random picture"; round UB drew a "?" card here, sliding
+             * in / out like a car). The branch stays so nothing else (a stale
+             * carpic, the paint overlay) draws in the empty picture area. */
         } else if (s_inner_state == 11) {
             /* Old car slides out to the right (state 11, ~433ms) — animPhase 0x0B: offset = counter*0x20.
              * On the very first frame(s) of state 11 the case-11 update that loads
@@ -8668,8 +8748,8 @@ static void frontend_render_track_selection_preview(float sx, float sy) {
      * x=EDI+0x12E=412, y=ESI+0x36=135 (640x480).
      * Slides in from right during track-switch animation (state 9). */
     if (s_track_random) {
-        /* [round UB] RANDOM: a "?" card in the preview's place, sliding in with it */
-        frontend_draw_random_card(412.0f + img_x_off_c, 135.0f, 152.0f, 224.0f, sx, sy);
+        /* [round VA 2026-11-09] RANDOM: no preview image (was round UB's "?" card).
+         * The branch stays so a stale track preview never draws under RANDOM. */
     } else if (s_track_preview_surface > 0) {
         fe_draw_surface_rect(s_track_preview_surface,
                              412.0f * sx + img_x_off, 135.0f * sy,

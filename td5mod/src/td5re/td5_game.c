@@ -48,6 +48,7 @@
 #include "td5_roam_ai.h"       /* GEO FREE ROAM AI racers (F7): opponents on the route, parked while roaming */
 #include "td5_roam_traffic.h"  /* GEO FREE ROAM ambient traffic (F8): pool slots, lane follower, signals */
 #include "td5_roam_cops.h"     /* GEO FREE ROAM police (F10): cop slots after the traffic pool */
+#include "td5_roam_handoff.h"  /* [round VE] the finished city race is remembered for RACE AGAIN / SELECT NEW CAR */
 #include "td5_police.h"        /* [round H HH] police pursuit in the normal races */
 #include "td5_frontend.h"
 #include "td5_horns.h"   /* [SELECTABLE HORNS] per-player horn catalogue */
@@ -364,6 +365,7 @@ typedef struct RaceSlotState {
 } RaceSlotState;
 
 static RaceSlotState s_slot_state[TD5_MAX_RACER_SLOTS];
+static int   s_last_race_span_offset;       /* [integ V] StartSpanOffset the last race started with */
 
 /* Per-actor metrics */
 typedef struct ActorRaceMetric {
@@ -415,6 +417,13 @@ static RaceResultEntry s_results[TD5_MAX_RACER_SLOTS];
  * original binary stores no arrest time — AwardWantedDamageScore @ 0x0043d690
  * writes only the bust count + ram score — so this is a port-added field. */
 static int32_t s_arrest_time[TD5_MAX_RACER_SLOTS];
+/* [round VC 2026-11-09] Cop-chase results: per-suspect count of material rams by
+ * a cop (every hit td5_ai_wanted_cop_hit accepts, first hit included), and the
+ * per-suspect OUTCOME frozen when the results table is built (TD5_CHASE_*), so the
+ * results screen reads the race's real state, not the live damage bar that the
+ * next race init clears. Both survive a View Replay through the snapshot. */
+static int16_t s_wanted_rams[TD5_MAX_RACER_SLOTS];
+static uint8_t s_chase_outcome[TD5_MAX_RACER_SLOTS];
 
 /* Checkpoint timing record (24 bytes = 12 x uint16, from binary at 0x46CBB0)
  * Loaded per-track via pointer table at 0x46CF6C (1-based index). */
@@ -616,6 +625,7 @@ static uint32_t s_race_end_timer_start;
 #define TD5_VICTORY_HOLD_MS 2500u
 static uint32_t s_victory_hold_start;   /* ms timestamp the star armed (0 = none) */
 static int      s_finish_position_display; /* 1-based place captured at finish (0 = none) */
+static int      s_roam_finish_results;     /* [round VE] this fade ends a FINISHED free-roam race: results screen */
 /* [MP per-viewport finish 2026-06-13] 1-based finishing place captured PER SLOT
  * the moment that slot crosses the line (0 = still racing). Drives each
  * split-screen viewport's own end-of-race indicator + coast-to-stop, so one
@@ -657,6 +667,8 @@ static RaceSlotState   s_saved_slot_state[TD5_MAX_RACER_SLOTS];
 static uint8_t         s_saved_race_order[TD5_MAX_RACER_SLOTS];
 static int             s_saved_slot_finish_place[TD5_MAX_RACER_SLOTS];
 static int32_t         s_saved_arrest_time[TD5_MAX_RACER_SLOTS];
+static int16_t         s_saved_wanted_rams[TD5_MAX_RACER_SLOTS];     /* [round VC] */
+static uint8_t         s_saved_chase_outcome[TD5_MAX_RACER_SLOTS];   /* [round VC] */
 static int             s_saved_finish_position_display;
 /* [REPLAY RESULTS STATS 2026-07-27] Several post-race summary columns don't read
  * s_results/s_metrics: COLLISIONS/AIR TIME come from g_race_metrics[] (wiped by
@@ -1631,8 +1643,18 @@ int td5_game_tick(void) {
             /* [GEO FREE ROAM F2-A] leaving free roam (pause menu "LEAVE FREE ROAM", or END
              * RACE NOW) goes back to the geo selector the player came from: no results screen */
             if (td5_roam_active()) {
+                /* [round VE] a FINISHED city race (roam_check_completion) ends like a normal race: the
+                 * results screen and its post-race menu, which re-arms the route for RACE AGAIN */
+                const int roam_results = (result == 1 && s_roam_finish_results);
+                s_roam_finish_results = 0;
                 td5_roam_end();
                 g_td5.game_state = TD5_GAMESTATE_MENU;
+                if (roam_results) {
+                    TD5_LOG_I(LOG_TAG, "Race finished (free roam race) -> results screen");
+                    frontend_roam_postrace_begin();
+                    td5_frontend_set_screen(TD5_SCREEN_RACE_RESULTS);
+                    return 0;
+                }
                 TD5_LOG_I(LOG_TAG, "Race exited (result=%d) -> leave free roam -> geo selector", result);
                 td5_frontend_set_screen(td5_frontend_roam_origin_screen());   /* [roam QA] map or FREE ROAM setup */
                 return 0;
@@ -2058,6 +2080,89 @@ int32_t td5_game_get_arrest_time(int slot)
     return s_arrest_time[slot];
 }
 
+/* [round VC 2026-11-09] One material cop ram on `slot` (a suspect). Called from
+ * td5_ai_wanted_cop_hit for every hit it accepts (first hit and re-hits alike), so
+ * the cop-chase results can list who the cop rammed, busted or not. */
+void td5_game_add_wanted_ram(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return;
+    if (s_wanted_rams[slot] < 0x7FFF) s_wanted_rams[slot]++;
+}
+
+/* [round VC] The cop's ram score alone (10 / 20 per hit + 50 per bust, the HUD's
+ * POINTS), without the placing points build_results_table adds to the results'
+ * secondary metric. */
+int td5_game_get_wanted_score(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return (int)s_metrics[slot].accumulated_score;
+}
+
+int td5_game_get_wanted_rams(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    return s_wanted_rams[slot];
+}
+
+/* [round VC 2026-11-09] Freeze each cop-chase racer's outcome from the mode's own
+ * state at the moment the results table is built: a SUSPECT whose wanted damage
+ * bar is drained (the arrest td5_ai_wanted_cop_hit completes, which also stamps
+ * the arrest time) is BUSTED; every other suspect got away: ESCAPED. Cops get
+ * TD5_CHASE_COP. Logs one line per racer (the v6-copchase-results row checks the
+ * screen's outcomes against these). No-op outside a cop chase. */
+static void cop_chase_capture_outcomes(void)
+{
+    int s;
+    if (!g_td5.wanted_mode_enabled) return;
+    for (s = 0; s < TD5_MAX_RACER_SLOTS; s++) {
+        uint8_t oc = TD5_CHASE_NONE;
+        if (s < g_traffic_slot_base && s_slot_state[s].state != 3) {
+            if (td5_game_cop_chase_is_cop(s)) {
+                oc = TD5_CHASE_COP;
+            } else if (td5_game_cop_chase_is_suspect(s)) {
+                oc = (g_wanted_damage_state[s] <= 0 || s_arrest_time[s] != 0)
+                         ? TD5_CHASE_BUSTED : TD5_CHASE_ESCAPED;
+            }
+        }
+        s_chase_outcome[s] = oc;
+        if (oc == TD5_CHASE_NONE) continue;
+        TD5_LOG_I(LOG_TAG,
+                  "COP CHASE RESULT: slot=%d car=%d outcome=%s rams=%d damage_left=%d "
+                  "arrest_time=%d arrests=%d points=%d finished=%d",
+                  s, td5_game_get_slot_car_index(s), td5_game_cop_chase_outcome_name(oc),
+                  (int)s_wanted_rams[s], (int)g_wanted_damage_state[s], (int)s_arrest_time[s],
+                  td5_game_get_wanted_kills(s), (int)s_metrics[s].accumulated_score,
+                  (int)s_slot_state[s].companion_1);
+    }
+}
+
+int td5_game_cop_chase_outcome(int slot)
+{
+    if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return TD5_CHASE_NONE;
+    return s_chase_outcome[slot];
+}
+
+const char *td5_game_cop_chase_outcome_name(int outcome)
+{
+    switch (outcome) {
+    case TD5_CHASE_COP:     return "COP";
+    case TD5_CHASE_BUSTED:  return "BUSTED";
+    case TD5_CHASE_ESCAPED: return "ESCAPED";
+    default:                return "-";
+    }
+}
+
+/* [round VC 2026-11-09] Mariano 2026-11-09 item 5: a SINGLE-PLAYER cop chase has
+ * no finishing position. The player is the cop chasing speeders, so "1ST" / the
+ * centred place digit means nothing; the race just fades out. (The victory star
+ * was already off for game type 8, see td5_game_begin_fade_out.) [integ-roamV,
+ * Mariano 2026-11-09] MP cop chase too: no place digit on any pane and no
+ * placing points on top of the ram score. */
+int td5_game_finish_place_hidden(void)
+{
+    return g_td5.wanted_mode_enabled;
+}
+
 /* Returns the race order slot index at position 'pos' (0=1st, ...).
  * [CONFIRMED: g_raceOrderTable = s_race_order at 0x004ae279] */
 int td5_game_get_race_order(int pos)
@@ -2106,6 +2211,7 @@ int td5_game_slot_finished_at_line(int slot)
 int td5_game_slot_finish_place(int slot)
 {
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return 0;
+    if (td5_game_finish_place_hidden()) return 0;   /* [round VC] SP cop chase */
     return s_slot_finish_place[slot];
 }
 
@@ -2652,7 +2758,10 @@ static void init_race_modes_and_seed(void)
             g_td5.ini.traffic_dyn_period    = s_sv_period;
             g_td5.ini.traffic_dyn_spawn_min = s_sv_smin;
             g_td5.ini.traffic_dyn_spawn_max = s_sv_smax;
-            g_td5.ini.start_span_offset     = s_sv_offset;
+            /* [integ V 2026-11-09] put the offset back only if nothing changed it since the mode race
+             * ran (a dev/selftest StartSpanOffset set after a drag race was wiped to 0). */
+            if (g_td5.ini.start_span_offset == s_last_race_span_offset)
+                g_td5.ini.start_span_offset = s_sv_offset;
             TD5_LOG_I(LOG_TAG, "InitRace: restored mode-tuned INI knobs (dynamic=%d period=%d spawn=%d..%d offset=%d)",
                       s_sv_dynamic, s_sv_period, s_sv_smin, s_sv_smax, s_sv_offset);
         } else {
@@ -4028,6 +4137,8 @@ static void init_race_track_resources(void)
      * 0..5 before first UpdateRaceOrder). */
     memset(s_metrics, 0, sizeof(s_metrics));
     memset(s_arrest_time, 0, sizeof(s_arrest_time));   /* [MP COP CHASE results] clear arrest times */
+    memset(s_wanted_rams, 0, sizeof(s_wanted_rams));   /* [round VC] rams per suspect */
+    memset(s_chase_outcome, 0, sizeof(s_chase_outcome));
     for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) {
         s_race_order[i] = (uint8_t)i;
     }
@@ -4367,6 +4478,7 @@ static void init_race_spawn_actors(void)
          * configured offset. Gated by TD5RE_REPLAY_OFFSET_FIX (cached): "0" reverts
          * to using the live offset (old, diverging behaviour). */
         int effective_start_span_offset = g_td5.ini.start_span_offset;
+        s_last_race_span_offset = g_td5.ini.start_span_offset;   /* [integ V] see the mode-knob restore */
         if (s_replay_mode) {
             static int s_replay_off_init = 0;
             static int s_replay_off_enabled = 1;
@@ -5697,6 +5809,7 @@ int td5_game_init_race_session(void) {
     s_race_end_timer_start = 0;
     s_victory_hold_start = 0;
     s_finish_position_display = 0;
+    s_roam_finish_results = 0;     /* [round VE] */
 
     /* Reset results table */
     reset_results_table();
@@ -6700,6 +6813,70 @@ static void mt_build_pane_rcmd(int vp, void *unused)
  * fixed-timestep sim loop stays internally monolithic BY DESIGN - its
  * per-sub-tick locals and continue/break flow make interior splits a
  * behavior risk. Verified bit-identical via the golden-trace suite. */
+/* [round VE] FREE ROAM race end = the normal race end. Mariano 2026-11-09: "when finishing a race use the
+ * regular fade animation, the position (the star if it's first place), and use the regular menu for end of
+ * race". Each human's place is captured as it crosses (the per-viewport finish digit, td5_hud.c); once every
+ * human is through (td5_roam_race_end_ready) the roam field goes into the SAME results tables a normal race
+ * fills (s_metrics / s_slot_state / s_race_order -> build_results_table), the local player's place drives
+ * the centred digit, and td5_game_begin_fade_out runs its usual star gate. The fade ends with result 1 and
+ * the FSM sends a finished roam race to the results screen (frontend_roam_postrace_begin) instead of the geo
+ * selector. Racer slots outside the roam field are marked not raced (state 3) so the table lists only it. */
+static void roam_check_completion(void)
+{
+    TD5_RoamFinalEntry fe[TD5_MAX_RACER_SLOTS];
+    uint8_t in_field[TD5_MAX_RACER_SLOTS] = { 0 };
+    TD5_Actor *pl;
+    int n, r, i, h, k, place = 1;
+    const int humans = td5_roam_race_humans();
+    if (g_td5.race_end_fade_state != 0) return;
+    for (h = 0; h < humans && h < TD5_MAX_RACER_SLOTS; h++) {
+        if (s_slot_finish_place[h] == 0 && td5_roam_race_human_finished(h)) {
+            const int rank = td5_roam_ai_human_rank(h);
+            s_slot_finish_place[h] = rank > 0 ? rank : 1;
+            TD5_LOG_I(LOG_TAG, "Viewport finish (roam): slot=%d place=%d", h, s_slot_finish_place[h]);
+        }
+    }
+    if (!td5_roam_race_end_ready()) return;
+    n = td5_roam_race_final_field(fe, TD5_MAX_RACER_SLOTS);
+    if (n <= 0) return;
+    for (r = 0; r < n; r++) {
+        const int sl = fe[r].slot;
+        ActorRaceMetric *m;
+        TD5_Actor *a;
+        if (sl < 0 || sl >= TD5_MAX_RACER_SLOTS) continue;
+        in_field[sl] = 1;
+        m = &s_metrics[sl];
+        m->post_finish_metric_base = fe[r].ticks > 0 ? (int32_t)fe[r].ticks : 1;
+        m->cumulative_timer = m->post_finish_metric_base;
+        m->display_position = (int16_t)r;
+        memset(m->lap_split_times, 0, sizeof m->lap_split_times);
+        for (k = 0; k < fe[r].nlap && k < 9; k++)
+            m->lap_split_times[k] = (int16_t)(fe[r].lap[k] > 32767 ? 32767 : fe[r].lap[k]);
+        if (s_slot_state[sl].state == 3) s_slot_state[sl].state = 1;
+        s_slot_state[sl].companion_1 = 1;
+        s_slot_state[sl].companion_2 = fe[r].finished ? 1 : 0;   /* 1 = crossed the line (an estimate is not) */
+        s_race_order[r] = (uint8_t)sl;
+        a = td5_game_get_actor(sl);
+        if (a) a->race_position = (uint8_t)r;
+        if (sl == 0) place = r + 1;
+        TD5_LOG_I(LOG_TAG, "Roam race end: %d. slot=%d %s ticks=%ld laps=%d", r + 1, sl,
+                  fe[r].finished ? "finished" : "racing (estimated)", fe[r].ticks, fe[r].nlap);
+    }
+    for (i = 0, r = n; i < TD5_MAX_RACER_SLOTS; i++) {
+        if (in_field[i]) continue;
+        s_slot_state[i].state = 3;           /* not in the roam field: no row in the results */
+        if (r < TD5_MAX_RACER_SLOTS) s_race_order[r++] = (uint8_t)i;
+    }
+    build_results_table();
+    td5_roam_handoff_capture_rerun();        /* RACE AGAIN / SELECT NEW CAR run this route again */
+    pl = td5_game_get_actor(0);
+    s_finish_position_display = place;
+    s_roam_finish_results = 1;
+    TD5_LOG_I(LOG_TAG, "Roam race end: %d racer(s), player place %d (race_position %d), humans %d -> normal fade",
+              n, place, pl ? (int)pl->race_position : -1, humans);
+    td5_game_begin_fade_out(g_td5.split_screen_mode);
+}
+
 static void frame_check_completion(void)
 {
     /* ---- Race completion check (before sim loop) ----
@@ -6710,9 +6887,10 @@ static void frame_check_completion(void)
      * The port mirrors that cadence: advance_pending_finish_state runs once
      * per frame per active slot here, feeding the results of any finish
      * promotion into check_race_completion's aggregate scan below. */
-    /* [GEO FREE ROAM F2-A] roam never finishes: no lap/checkpoint/finish detector, no
-     * aggregate completion scan, no results (the only way out is "Leave free roam") */
-    if (td5_roam_active()) return;
+    /* [GEO FREE ROAM F2-A] roam has no lap/checkpoint/finish detector of its own: free roam never
+     * finishes. [round VE] A city RACE ends the normal way once every human is through its finish
+     * (roam_check_completion: results tables, fade, place / star, then the results screen). */
+    if (td5_roam_active()) { roam_check_completion(); return; }
     if (g_td5.race_end_fade_state == 0) {
         int pf;
         uint32_t frame_accum = td5_game_normalized_dt_to_accum(g_td5.normalized_frame_dt);
@@ -6860,14 +7038,6 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
             s_resume_countdown_state = 0;
             s_resume_countdown_roam = 1;
         }
-    }
-    if (td5_roam_race_take_leave() && !s_pause_exit_pending) {
-        /* [roam HA] results dismissed: the LEAVE FREE ROAM exit (fade, release, back to the geo generator) */
-        s_pause_menu_active = 0;
-        s_pause_exit_pending = 1;
-        s_finish_position_display = 0;
-        td5_game_begin_fade_out(0);
-        TD5_LOG_I(LOG_TAG, "Roam race results dismissed -> leaving to the geo generator");
     }
 
     /* [BUG 5a 2026-06-15] Per-frame ESC edge for the cinematic abort.
@@ -8644,7 +8814,7 @@ static void frame_render(void)
          * opaque world), then the additive light pass — this order keeps
          * headlight pools from being darkened by the shadow term. */
         if (!td5_render_photobooth_active())
-            td5_render_apply_shadow_pass(s_viewports[vp].x, s_viewports[vp].y);
+            td5_render_apply_shadow_pass(vp, s_viewports[vp].x, s_viewports[vp].y);
 
         /* [RT2 P4] Sky-visibility GI: multiplicative, right after the sun-shadow
          * composite and BEFORE the additive lights (so headlight pools aren't
@@ -10453,6 +10623,11 @@ static void build_results_table(void) {
              * can reuse that routine: override it to the wreck count and skip the
              * championship / ultimate position points entirely. */
             r->secondary_metric = (int32_t)r->wanted_kills;
+        } else if (td5_game_finish_place_hidden()) {
+            /* [round VC 2026-11-09] SP cop chase has no finishing place, so no
+             * placing points either: they turned the HUD's ram POINTS into
+             * "POINTS 155" for a 140-point chase on the last frames (the results
+             * table now shows the ram score alone, td5_game_get_wanted_score). */
         } else if (g_td5.race_rule_variant == 0 && pos < TD5_MAX_RACER_SLOTS) {
             /* Championship: {15, 12, 10, 5, 4, 3} */
             r->secondary_metric += s_championship_points[pos];
@@ -10461,6 +10636,8 @@ static void build_results_table(void) {
             r->secondary_metric += s_ultimate_points[pos];
         }
     }
+
+    cop_chase_capture_outcomes();   /* [round VC] freeze BUSTED / ESCAPED per suspect */
 
     /* Sort results by the appropriate metric for the game type */
     if (battle) {
@@ -10531,6 +10708,8 @@ static void capture_replay_results_snapshot(void) {
     memcpy(s_saved_race_order,        s_race_order,        sizeof(s_race_order));
     memcpy(s_saved_slot_finish_place, s_slot_finish_place, sizeof(s_slot_finish_place));
     memcpy(s_saved_arrest_time,       s_arrest_time,       sizeof(s_arrest_time));
+    memcpy(s_saved_wanted_rams,       s_wanted_rams,       sizeof(s_wanted_rams));
+    memcpy(s_saved_chase_outcome,     s_chase_outcome,     sizeof(s_chase_outcome));
     s_saved_finish_position_display = s_finish_position_display;
     /* [REPLAY RESULTS STATS 2026-07-27] g_race_metrics[] + the live actor summary
      * fields the results accessors fall back to (see td5_game_get_result_avg_speed,
@@ -10566,6 +10745,8 @@ static void restore_replay_results_snapshot(void) {
     memcpy(s_race_order,        s_saved_race_order,        sizeof(s_race_order));
     memcpy(s_slot_finish_place, s_saved_slot_finish_place, sizeof(s_slot_finish_place));
     memcpy(s_arrest_time,       s_saved_arrest_time,       sizeof(s_arrest_time));
+    memcpy(s_wanted_rams,       s_saved_wanted_rams,       sizeof(s_wanted_rams));
+    memcpy(s_chase_outcome,     s_saved_chase_outcome,     sizeof(s_chase_outcome));
     s_finish_position_display = s_saved_finish_position_display;
     /* [REPLAY RESULTS STATS 2026-07-27] Restore g_race_metrics[] + the live actor
      * summary fields so the COLLISIONS/AIR TIME/AVG SPEED/HIGHEST POSITION columns
@@ -11519,6 +11700,7 @@ int td5_game_get_victory_position(void) {
      * off s_slot_finish_place, which a quit never sets). */
     if (s_pause_exit_pending || s_pause_lobby_pending || s_pause_restart_pending)
         return 0;
+    if (td5_game_finish_place_hidden()) return 0;   /* [round VC] SP cop chase: no place */
     /* [FIX timeout-DNF 2026-06-23] A P2P checkpoint-timer expiry (companion_2==2)
      * is a LOSS, not a finish — suppress the centered finishing-place digit. The
      * original routes a timeout to the FAILED results screen with no position

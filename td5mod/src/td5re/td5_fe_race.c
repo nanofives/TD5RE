@@ -269,12 +269,12 @@ static void frontend_mp_position_enter(void);   /* [#8] advance phase 0 -> posit
 static int frontend_track_is_circuit(int track_slot);
 static void frontend_update_laps_button_visibility(int laps_btn_idx);
 static void frontend_update_direction_button_visibility(int dir_btn_idx, int manage_label);
-/* [round UE 2026-11-08] Mariano (Q3): the LAPS row is hidden in single-player time
- * trial, which always runs one lap (ConfigureGameTypeFlags case 7 forces
- * circuit_lap_count = 1 and the launch never re-commits LAPS for game type 7). */
-static int frontend_laps_row_mode_hidden(void) {
-    return s_selected_game_type == 7 && !s_mp_flow;
-}
+/* [round UE 2026-11-08] Mariano (Q3) hid the LAPS row in single-player time trial
+ * (one lap forced). [round VA 2026-11-09] Mariano: "there's no lap configuration on
+ * the latest version for circuits on time trials". The row is back: shown on
+ * circuit tracks in time trial like in a single race, hidden on point-to-point,
+ * and frontend_init_race_schedule commits it for game type 7 too. No mode hides
+ * LAPS any more, so the old frontend_laps_row_mode_hidden() is gone. */
 /* [CONSOLIDATION 2026-07-21] RACE OPTIONS entry (defined below, near the screen).
  * back_mode: RO_BACK_PARENT returns to the parent; RO_BACK_DRAG_OPPONENT re-enters
  * the SP-drag opponent car-select pass. */
@@ -748,6 +748,30 @@ int frontend_roam_launch_mp(void)
     frontend_init_race_schedule();
     frontend_init_display_mode_state();
     return 1;
+}
+
+/* [round VE] The finished city race's post-race menu (td5_frontend.h). */
+static int s_roam_postrace;
+
+void frontend_roam_postrace_begin(void)
+{
+    s_roam_postrace = 1;
+    s_results_rerace_flag = 0;     /* the RACE AGAIN snapshot is this race's car */
+    TD5_LOG_I(LOG_TAG, "RaceResults: free-roam race finished -> results + post-race menu (rerun %s)",
+              td5_roam_handoff_rerun_valid() ? "remembered" : "MISSING");
+}
+
+int frontend_roam_postrace_active(void) { return s_roam_postrace; }
+
+/* RACE AGAIN / SELECT NEW CAR of the city race: arm a new session on the same route. 0 = it could not (the
+ * caller returns to the map the race came from). */
+static int frontend_roam_postrace_rearm(const char *what)
+{
+    const int ok = td5_roam_handoff_rearm();
+    if (ok) s_selected_track = td5_roam_host_track();
+    TD5_LOG_I(LOG_TAG, "RaceResults: free-roam %s -> %s (host track %d)", what,
+              ok ? "same route re-armed" : "re-arm FAILED, back to the map", s_selected_track);
+    return ok;
 }
 
 /* The route the GEOSPATIAL entry races: the geo map's pins when it holds 2..max of them, else the
@@ -1228,7 +1252,7 @@ static void frontend_random_track_rows(int dir_btn, int laps_btn) {
             s_buttons[dir_btn].disabled = 1;
             if (s_selected_button == dir_btn) s_selected_button = 0;
         }
-        if (laps_btn >= 0 && laps_btn < s_button_count && !frontend_laps_row_mode_hidden()) {
+        if (laps_btn >= 0 && laps_btn < s_button_count) {
             s_buttons[laps_btn].hidden = 0;
             s_buttons[laps_btn].disabled = 0;
         }
@@ -1406,32 +1430,10 @@ static int frontend_track_has_high_scores(int track) {
     return td5_save_td6_record_level_valid(lvl) ? 1 : 0;
 }
 
-/* [round UB 2026-11-08] The RANDOM entry's preview: a "?" card filling the
- * preview rect (x,y,w,h in the 640x480 canvas). Same steel interior + button-blue
- * rim as the frontend's selector chips, so it reads as part of the menu rather
- * than a missing picture. NON-STATIC: td5_frontend.c draws it on the car select
- * and SELECT TRACK previews. */
-void frontend_draw_random_card(float x, float y, float w, float h, float sx, float sy) {
-    const float px = x * sx, py = y * sy, pw = w * sx, ph = h * sy;
-    const uint32_t chip_c = 0xC0202838u, rim_c = 0xFF496BDCu;
-    float scale;
-    if (td5_vui_shapes_available()) {
-        td5_vui_roundrect(px, py, pw, ph, 8.0f * sy, 8.0f * sy, 3.0f * sx, 3.0f * sy,
-                          rim_c, rim_c, rim_c, chip_c, 1.0f);
-    } else {
-        const float bx = 3.0f * sx, byb = 3.0f * sy;
-        td5_vui_quad(px, py, pw, ph, chip_c, -1, 0, 0, 0, 0);
-        td5_vui_quad(px, py, pw, byb, rim_c, -1, 0, 0, 0, 0);
-        td5_vui_quad(px, py + ph - byb, pw, byb, rim_c, -1, 0, 0, 0, 0);
-        td5_vui_quad(px, py, bx, ph, rim_c, -1, 0, 0, 0, 0);
-        td5_vui_quad(px + pw - bx, py, bx, ph, rim_c, -1, 0, 0, 0, 0);
-    }
-    /* A "?" about half the card's height: the 24-px glyph cell scaled up, centred
-     * (caps sit on rows 8..23 of the cell, so lift by the cell's top 8 rows). */
-    scale = (h * 0.5f) / 16.0f;
-    fe_draw_text_centered(px + pw * 0.5f, py + ph * 0.5f - (8.0f + 8.0f) * scale * sy,
-                          "?", 0xFFFFCC33u, sx * scale, sy * scale);
-}
+/* [round VA 2026-11-09] Mariano: "delete random picture". The RANDOM entry shows
+ * no preview image (the round UB "?" card, frontend_draw_random_card, is gone):
+ * the RANDOM title stays, the picture area stays empty on car select, SELECT
+ * TRACK, the cup track picker and the split-screen car grid. */
 
 static void frontend_load_selected_car_preview(void) {
     int car_index = frontend_current_car_index();
@@ -3001,6 +3003,10 @@ static int mp_repeat_fire(int p, uint32_t held, uint32_t edge, uint32_t now); /*
 /* [splitscreen back-confirm] Deferred back action for the car-select GRID. */
 static void mp_simul_carsel_back_cb(void) {
     int n = s_num_human_players;
+    if (s_roam_postrace && td5_roam_armed()) {   /* [round VE] backing out of a city race's re-pick drops it */
+        s_roam_postrace = 0;
+        td5_roam_cancel();
+    }
     if (n < 2) n = 2;
     if (n > TD5_MAX_HUMAN_PLAYERS) n = TD5_MAX_HUMAN_PLAYERS;
     mp_simul_carsel_back(n);
@@ -3166,6 +3172,13 @@ static void frontend_mp_simul_carsel_update(void) {
             /* Keep s_mp_simul set so backing here from track select re-enters the
              * car grid (phase 1) with picks intact; the Screen_CarSelection
              * intercept clears it when the MP flow ends. */
+            if (td5_roam_armed() && s_roam_postrace) {
+                /* [round VE] CAR SELECTION from a city race's post-race menu: straight back into its route */
+                s_roam_postrace = 0;
+                TD5_LOG_I(LOG_TAG, "CarSelect grid: all %d ready -> the city race again", n);
+                if (frontend_roam_launch_mp()) return;
+                td5_roam_cancel();
+            }
             TD5_LOG_I(LOG_TAG, "CarSelect grid: all %d ready -> track select", n);
             td5_frontend_set_screen(TD5_SCREEN_TRACK_SELECTION);
             return;
@@ -5516,6 +5529,7 @@ void Screen_MpPostRace(void) {
             frontend_create_button(TR("CAR SELECTION"), BX, y0 + 3 * step, BW, BH);
             frontend_create_button(TR("GAME MODE"),     BX, y0 + 4 * step, BW, BH);
             frontend_create_button(TR("MAIN MENU"),     BX, y0 + 5 * step, BW, BH);
+            if (s_roam_postrace) s_buttons[1].disabled = 1;   /* [round VE] a city race has no View Replay */
         }
         s_selected_button = 0;
         frontend_begin_timed_animation();
@@ -5590,6 +5604,15 @@ void Screen_MpPostRace(void) {
             /* --- Standard MP race --- */
             switch (s_mp_postrace_choice) {
             case 0: /* RACE AGAIN — rematch with the same settings */
+                if (s_roam_postrace) {
+                    /* [round VE] the same city route, split screen, the lobby's cars */
+                    s_roam_postrace = 0;
+                    if (!frontend_roam_postrace_rearm("RACE AGAIN (split screen)") || !frontend_roam_launch_mp()) {
+                        if (td5_roam_armed()) td5_roam_cancel();
+                        td5_frontend_set_screen(td5_frontend_roam_origin_screen());
+                    }
+                    break;
+                }
                 if (s_results_rerace_flag) {
                     s_selected_car          = s_snap_car;
                     s_selected_paint        = s_snap_paint;
@@ -5609,6 +5632,7 @@ void Screen_MpPostRace(void) {
                 frontend_init_race_schedule();
                 break;
             case 1: /* VIEW REPLAY — reuse RaceResults case 1 replay path */
+                if (s_roam_postrace) { s_inner_state = 0; break; }   /* [round VE] greyed: never reached */
                 td5_game_set_demo_mode(0);
                 td5_input_set_replay_mode(1);
                 td5_input_set_playback_active(1);
@@ -5632,6 +5656,12 @@ void Screen_MpPostRace(void) {
                     s_mp_simul = 1;
                     s_mp_phase = 1;
                 }
+                /* [round VE] a city race: the grid's READY launches the same route (the grid's BACK cancels it) */
+                if (s_roam_postrace && !frontend_roam_postrace_rearm("CAR SELECTION (split screen)")) {
+                    s_roam_postrace = 0;
+                    td5_frontend_set_screen(td5_frontend_roam_origin_screen());
+                    break;
+                }
                 TD5_LOG_I(LOG_TAG, "MP post-race: CAR SELECTION -> car grid (simul=%d phase=%d)",
                           s_mp_simul, s_mp_phase);
                 td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
@@ -5643,6 +5673,7 @@ void Screen_MpPostRace(void) {
                 td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
                 break;
             }
+            if (s_mp_postrace_choice != 1 && s_mp_postrace_choice != 3) s_roam_postrace = 0;   /* [round VE] */
         }
         break;
 
@@ -8036,9 +8067,7 @@ static int frontend_track_is_circuit(int track_slot) {
 static void frontend_update_laps_button_visibility(int laps_btn_idx) {
     if (laps_btn_idx < 0 || laps_btn_idx >= s_button_count) return;
     int show;
-    if (frontend_laps_row_mode_hidden())
-        show = 0;                                             /* [round UE] time trial: always 1 lap */
-    else if (s_selected_track < 0)
+    if (s_selected_track < 0)
         show = 1;                                             /* random/unset: keep the row */
     else if (td5_trackgen_is_geo_slot(s_selected_track))
         show = 0;   /* [F11b] the city sprint or the point-to-point strip; no level09x LEVELINF needed */
@@ -10587,6 +10616,13 @@ static const char *frontend_summary_car_name(int slot) {
     static int   s_for_car[TD5_MAX_RACER_SLOTS];
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return "";
     int car = (slot >= 0 && slot < TD5_MAX_RACER_SLOTS) ? g_td5.ai_car_indices[slot] : 0;
+    /* [round VC 2026-11-09] A cop chase swaps slot 0's car to a police car in
+     * g_td5.car_index (td5_game.c cop-car forcing loop), not in ai_car_indices[0]:
+     * read the car the slot really drove, or the cop row names the menu pick. */
+    if (td5_game_is_wanted_mode()) {
+        int real = td5_game_get_slot_car_index(slot);
+        if (real >= 0) car = real;
+    }
     if (s_loaded[slot] && s_for_car[slot] == car) return s_name[slot];
     s_loaded[slot]  = 1;
     s_for_car[slot] = car;
@@ -10687,20 +10723,27 @@ void  fe_draw_small_text(float x, float y, const char *text, uint32_t color, flo
 float fe_measure_small_text(const char *text);
 void  frontend_format_score_time(char *buf, size_t cap, int raw_ticks, int type);
 
+/* [round VC] Cut `buf` until it measures <= `max_w` canvas px (small font). */
+static void fe_cop_chase_fit(char *buf, float max_w) {
+    size_t n = strlen(buf);
+    while (n > 1 && fe_measure_small_text(buf) > max_w) buf[--n] = '\0';
+}
+
 /* [MP COP CHASE RESULTS 2026-06-25] Draw the shared right-hand columns
- * (CAR / TOP SPEED / AVG SPEED / HITS / AIR TIME) for one cop-chase results row.
- * The mode-specific third column (ARRESTS for cops, ARREST TIME for suspects) is
- * drawn by the caller; this keeps "all the other values" identical between the
+ * (CAR / TOP SPEED / AVG SPEED / last column) for one cop-chase results row.
+ * The mode columns (ARRESTS + POINTS for cops, OUTCOME + BUSTED AT for suspects)
+ * and the last column's value (HITS / RAMMED) come from the caller [round VC]; this keeps "all the other values" identical between the
  * COPS and SUSPECTS sections. Columns are centred on their canvas-x like the
  * standard MP table. */
 static void fe_cop_chase_draw_common(int slot, float y, uint32_t color,
                                      float sx, float sy, float gsx, float sum_slide,
                                      int kph, const char *unit,
                                      float cx_car, float cx_top, float cx_avg,
-                                     float cx_hits, float cx_air) {
+                                     float cx_hits, int hits_value) {
     char buf[40];
     #define CC_CTR(CX, S) (((CX) + sum_slide) * sx - fe_measure_small_text(S) * 0.5f * gsx)
     snprintf(buf, sizeof(buf), "%s", frontend_summary_car_name(slot));
+    fe_cop_chase_fit(buf, 88.0f);
     fe_draw_small_text(CC_CTR(cx_car, buf), y, buf, color, sx, sy);
 
     const TD5_RaceMetrics *m = td5_game_get_metrics(slot);
@@ -10713,13 +10756,27 @@ static void fe_cop_chase_draw_common(int slot, float y, uint32_t color,
     snprintf(buf, sizeof(buf), "%d%s", frontend_summary_speed_disp(avg_raw, kph), unit);
     fe_draw_small_text(CC_CTR(cx_avg, buf), y, buf, color, sx, sy);
 
-    int collisions = m ? m->collisions : 0;
-    int air_tenths = m ? (m->air_ticks * 10 + 15) / 30 : 0;
-    snprintf(buf, sizeof(buf), "%d", collisions);
+    /* [round VC] the last column is the caller's: HITS (all collisions) for a cop,
+     * RAMMED (the cop's material rams on this suspect) for a suspect. The AIR TIME
+     * column is gone from the chase table: the OUTCOME + BUSTED AT columns needed
+     * the room, and air time says nothing about a chase. */
+    snprintf(buf, sizeof(buf), "%d", hits_value);
     fe_draw_small_text(CC_CTR(cx_hits, buf), y, buf, color, sx, sy);
-    snprintf(buf, sizeof(buf), "%d.%ds", air_tenths / 10, air_tenths % 10);
-    fe_draw_small_text(CC_CTR(cx_air, buf), y, buf, color, sx, sy);
     #undef CC_CTR
+}
+
+/* [round VC 2026-11-09] What the cop-chase results table last DREW per suspect
+ * (TD5_CHASE_*, 0 = not drawn), so the v6-copchase-results row can check the
+ * screen against the race state instead of trusting the accessor alone. */
+static int s_vc_drawn_outcome[TD5_MAX_RACER_SLOTS];
+static void fe_vc_note_drawn_outcome(int slot, int oc) {
+    if (slot >= 0 && slot < TD5_MAX_RACER_SLOTS) s_vc_drawn_outcome[slot] = oc;
+}
+int frontend_vc_drawn_outcome(int slot) {
+    return (slot >= 0 && slot < TD5_MAX_RACER_SLOTS) ? s_vc_drawn_outcome[slot] : 0;
+}
+void frontend_vc_reset_drawn_outcomes(void) {
+    for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) s_vc_drawn_outcome[i] = 0;
 }
 
 /* [r3 2026-06-15] Race-results table, reworked to the HIGH-SCORES format
@@ -10768,17 +10825,30 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
      * '-' if they escaped to the finish un-arrested). Every other column —
      * CAR / TOP SPEED / AVG SPEED / HITS / AIR TIME — is kept. The original has
      * no MP cop-chase results screen, so this is a port-only layout. */
-    if (td5_game_mp_cop_chase_active()) {
+    /* [round VC 2026-11-09] Mariano item 6: SINGLE-PLAYER cop chase uses this table
+     * too (it fell into the plain race table: finish times, no word on who got
+     * away). Each SUSPECT row now says what happened to it: OUTCOME = BUSTED (its
+     * damage bar drained by the cop's rams) or ESCAPED, BUSTED AT = the time of the
+     * arrest, RAMMED = the cop's material rams on it. COPS show ARRESTS + the ram
+     * POINTS the HUD counted. Outcomes come from td5_game_cop_chase_outcome, frozen
+     * from the mode's state when the results table was built. */
+    if (td5_game_is_wanted_mode()) {
             #define CHASE_CTR(CX, S) (((CX) + sum_slide) * sx - fe_measure_small_text(S) * 0.5f * gsx)
         /* Column anchors (640x480 canvas px): NAME left-aligned at the title
-         * edge; the rest centred. The 3rd column carries the mode value. */
-        const float cc_name = 126.0f;
-        const float cc_car  = 222.0f;
-        const float cc_stat = 312.0f;   /* ARRESTS (cops) / ARREST TIME (suspects) */
-        const float cc_top  = 378.0f;
-        const float cc_avg  = 436.0f;
-        const float cc_hits = 492.0f;
-        const float cc_air  = 552.0f;
+         * edge; the rest centred. Columns 3 + 4 carry the mode values. */
+        /* Widths measured on the 2026-11-09 frame (small font, canvas px): names
+         * ~70, car names <= 88 (fitted), OUTCOME / ESCAPED ~60, a time ~55, a
+         * speed ~50, RAMMED ~55. Long headers go on two lines (TOP / SPEED). */
+        const float cc_name  = 120.0f;   /* left edge; names fitted to 78 px      */
+        const float cc_car   = 247.0f;   /* car names fitted to 88 px             */
+        const float cc_stat  = 323.0f;   /* ARRESTS (cops) / OUTCOME (suspects)   */
+        const float cc_stat2 = 389.0f;   /* POINTS (cops)  / BUSTED AT (suspects) */
+        const float cc_top   = 447.0f;
+        const float cc_avg   = 501.0f;
+        const float cc_hits  = 554.0f;   /* HITS (cops)    / RAMMED (suspects)    */
+        const float cc_end   = 586.0f;   /* separator right edge                  */
+        const uint32_t CC_BUSTED  = 0xFFFF6A4Au;   /* red-orange: arrested */
+        const uint32_t CC_ESCAPED = 0xFF7CE07Cu;   /* green: got away      */
         const uint32_t CC_HDR   = 0xFFFFFFFFu;   /* white headers        */
         const uint32_t CC_TITLE = 0xFFFFC23Au;   /* amber section titles  */
         const uint32_t CC_SELF  = 0xFFD9C50Cu;   /* gold = local player   */
@@ -10800,28 +10870,40 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
         for (int section = 0; section < 2; section++) {
             int  cnt   = section == 0 ? n_cop : n_sus;
             int *slots = section == 0 ? cc_cop : cc_sus;
-            const char *title    = section == 0 ? "COPS" : "SUSPECTS";
-            const char *stat_hdr = section == 0 ? "ARRESTS" : "ARREST TIME";
+            const char *title     = section == 0 ? TR("COPS") : TR("SUSPECTS");
+            const char *stat_hdr  = section == 0 ? TR("ARRESTS") : TR("OUTCOME");
+            const char *stat2_hdr = section == 0 ? TR("POINTS") : TR("BUSTED AT");
 
             /* Section title (left-aligned at the title edge). */
             fe_draw_small_text((cc_name + sum_slide) * sx, yc * sy, title, CC_TITLE, sx, sy);
-            yc += 16.0f;
+            yc += 22.0f;   /* room for the two-line headers' top line (yc - 7) */
 
-            /* Column headers. */
-            { const char *h_name = TR("NAME"), *h_car = TR("CAR"), *h_tsp = TR("TOP SPD");
-              const char *h_asp  = TR("AVG SPD"), *h_hit = TR("HITS"), *h_air = TR("AIR");
-              fe_draw_small_text((cc_name + sum_slide) * sx, yc * sy, h_name, CC_HDR, sx, sy);
-              fe_draw_small_text(CHASE_CTR(cc_car,  h_car),   yc * sy, h_car,    CC_HDR, sx, sy);
-              fe_draw_small_text(CHASE_CTR(cc_stat, stat_hdr),yc * sy, stat_hdr, CC_HDR, sx, sy);
-              fe_draw_small_text(CHASE_CTR(cc_top,  h_tsp),   yc * sy, h_tsp,    CC_HDR, sx, sy);
-              fe_draw_small_text(CHASE_CTR(cc_avg,  h_asp),   yc * sy, h_asp,    CC_HDR, sx, sy);
-              fe_draw_small_text(CHASE_CTR(cc_hits, h_hit),   yc * sy, h_hit,    CC_HDR, sx, sy);
-              fe_draw_small_text(CHASE_CTR(cc_air,  h_air),   yc * sy, h_air,    CC_HDR, sx, sy); }
+            /* Column headers: single words on the middle line (yc), two-word
+             * headers stacked on yc - 7 / yc + 7 like the race results table. */
+            { const char *h_name = TR("NAME"), *h_car = TR("CAR"), *h_speed = TR("SPEED");
+              const char *h_top  = TR("TOP"), *h_avg = TR("AVG");
+              const char *h_hit  = section == 0 ? TR("HITS") : TR("RAMMED");
+              const float ht = (yc - 7.0f) * sy, hm = yc * sy, hb = (yc + 7.0f) * sy;
+              fe_draw_small_text((cc_name + sum_slide) * sx, hm, h_name, CC_HDR, sx, sy);
+              fe_draw_small_text(CHASE_CTR(cc_car,  h_car),    hm, h_car,    CC_HDR, sx, sy);
+              fe_draw_small_text(CHASE_CTR(cc_stat, stat_hdr), hm, stat_hdr, CC_HDR, sx, sy);
+              if (section == 0) {
+                  fe_draw_small_text(CHASE_CTR(cc_stat2, stat2_hdr), hm, stat2_hdr, CC_HDR, sx, sy);
+              } else {
+                  const char *h_b = TR("BUSTED"), *h_at = TR("AT");
+                  fe_draw_small_text(CHASE_CTR(cc_stat2, h_b),  ht, h_b,  CC_HDR, sx, sy);
+                  fe_draw_small_text(CHASE_CTR(cc_stat2, h_at), hb, h_at, CC_HDR, sx, sy);
+              }
+              fe_draw_small_text(CHASE_CTR(cc_top,  h_top),   ht, h_top,   CC_HDR, sx, sy);
+              fe_draw_small_text(CHASE_CTR(cc_top,  h_speed), hb, h_speed, CC_HDR, sx, sy);
+              fe_draw_small_text(CHASE_CTR(cc_avg,  h_avg),   ht, h_avg,   CC_HDR, sx, sy);
+              fe_draw_small_text(CHASE_CTR(cc_avg,  h_speed), hb, h_speed, CC_HDR, sx, sy);
+              fe_draw_small_text(CHASE_CTR(cc_hits, h_hit),   hm, h_hit,   CC_HDR, sx, sy); }
             /* Header/rows separator. */
-            td5_vui_quad((cc_name + sum_slide) * sx, (yc + 9.0f) * sy,
-                         (cc_air + 24.0f - cc_name) * sx, 2.0f * sy,
+            td5_vui_quad((cc_name + sum_slide) * sx, (yc + 16.0f) * sy,
+                         (cc_end - cc_name) * sx, 2.0f * sy,
                          0xFFB0B8C0u, -1, 0.0f, 0.0f, 1.0f, 1.0f);
-            yc += 18.0f;
+            yc += 25.0f;
 
             if (cnt == 0) {
                 fe_draw_small_text((cc_name + sum_slide) * sx, yc * sy,
@@ -10843,26 +10925,44 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
                     const char *pn = frontend_human_display_name(slot);
                     if (pn) snprintf(nb, sizeof(nb), "%s", pn);
                     else    snprintf(nb, sizeof(nb), "P%d", slot + 1);
+                } else if (section == 1) {
+                    /* [round VC] AI speeders are numbered, not N identical "CPU"s */
+                    snprintf(nb, sizeof(nb), "%s %d", TR("SPEEDER"), k + 1);
                 } else {
                     snprintf(nb, sizeof(nb), "%s", TR("CPU"));
                 }
+                fe_cop_chase_fit(nb, 78.0f);   /* [round VC] never run into the CAR column */
                 fe_draw_small_text((cc_name + sum_slide) * sx, y, nb, rc, sx, sy);
 
-                /* Mode-specific 3rd column: cops show ARREST count, suspects show
-                 * TIME OF ARREST ('-' when never arrested / finished the race). */
-                char vb[28];
+                /* Mode columns 3 + 4. Cops: ARRESTS, ram POINTS. Suspects: OUTCOME
+                 * (BUSTED / ESCAPED, coloured) and BUSTED AT (time of the arrest,
+                 * '-' for a suspect that got away). */
+                char vb[28], vb2[28];
+                uint32_t oc_col = rc;
+                int hits_value;
                 if (section == 0) {
+                    const TD5_RaceMetrics *cm = td5_game_get_metrics(slot);
                     snprintf(vb, sizeof(vb), "%d", td5_game_get_wanted_kills(slot));
+                    snprintf(vb2, sizeof(vb2), "%d", td5_game_get_wanted_score(slot));
+                    hits_value = cm ? cm->collisions : 0;
                 } else {
-                    int32_t at = td5_game_get_arrest_time(slot);
-                    if (at > 0) frontend_format_score_time(vb, sizeof(vb), at, 0);
-                    else        snprintf(vb, sizeof(vb), "-");
+                    const int oc = td5_game_cop_chase_outcome(slot);
+                    const int32_t at = td5_game_get_arrest_time(slot);
+                    snprintf(vb, sizeof(vb), "%s", TR(td5_game_cop_chase_outcome_name(oc)));
+                    oc_col = (oc == TD5_CHASE_BUSTED) ? CC_BUSTED
+                           : (oc == TD5_CHASE_ESCAPED) ? CC_ESCAPED : rc;
+                    if (oc == TD5_CHASE_BUSTED && at > 0) frontend_format_score_time(vb2, sizeof(vb2), at, 0);
+                    else                                  snprintf(vb2, sizeof(vb2), "-");
+                    hits_value = td5_game_get_wanted_rams(slot);
+                    fe_vc_note_drawn_outcome(slot, oc);
                 }
-                fe_draw_small_text(CHASE_CTR(cc_stat, vb), y, vb, rc, sx, sy);
+                fe_draw_small_text(CHASE_CTR(cc_stat, vb), y, vb, oc_col, sx, sy);
+                fe_draw_small_text(CHASE_CTR(cc_stat2, vb2), y, vb2, rc, sx, sy);
 
-                /* Shared CAR / speeds / HITS / AIR columns ("all the other values"). */
+                /* Shared CAR / speeds / last columns ("all the other values"). */
                 fe_cop_chase_draw_common(slot, y, rc, sx, sy, gsx, sum_slide,
-                                         kph, unit, cc_car, cc_top, cc_avg, cc_hits, cc_air);
+                                         kph, unit, cc_car, cc_top, cc_avg, cc_hits,
+                                         hits_value);
                 yc += row_h;
             }
             yc += 14.0f;   /* gap before the next section */
@@ -11296,6 +11396,53 @@ static void frontend_mp_register_high_scores(void)
               registered, humans, group_idx, td6_level, group_type,
               s_score_insert_mask, s_score_insert_pos);
 }
+
+/* [round VA 2026-11-09] Where the results menu's QUIT goes, without side effects
+ * (Screen_RaceResults case 4 applies them). Original dispatch [CONFIRMED @
+ * 0x004233E0]: single race -> name entry (0x19); cup mid-progress -> main menu;
+ * cup complete -> CUP WON / CUP FAILED by slot 0's finishing position. Port
+ * branches: the MP cup (winners podium / abandon to main menu), and single-player
+ * DRAG -> main menu: Mariano, "no high scores for drag strip", so drag never
+ * reaches the name entry or the high-score table. */
+static TD5_ScreenIndex frontend_results_quit_target(void) {
+    if (td5_game_mp_cup_active())
+        return td5_game_mp_cup_has_next() ? TD5_SCREEN_MAIN_MENU : TD5_SCREEN_CUP_WINNERS;
+    if (s_selected_game_type == 9) return TD5_SCREEN_MAIN_MENU;
+    if (s_selected_game_type < 1)  return TD5_SCREEN_NAME_ENTRY;     /* 0x19 */
+    if (!s_results_cup_complete)   return TD5_SCREEN_MAIN_MENU;      /* 5 */
+    return (td5_game_get_finish_position(0) == 0) ? TD5_SCREEN_CUP_WON      /* 0x1B */
+                                                  : TD5_SCREEN_CUP_FAILED;  /* 0x1A */
+}
+
+/* [round VA] The post-race name entry never runs for a drag race (any route in). */
+static int frontend_name_entry_skips_mode(void) {
+    return s_selected_game_type == 9;
+}
+
+#ifndef TD5RE_RELEASE
+/* [round VA 2026-11-09] v3-drag-no-highscore, called after a real single-player
+ * drag race: the results QUIT goes to the main menu and the name entry refuses
+ * the run; control: a single race still goes to the name entry. Restores the
+ * game type. 0 = pass, 1 = fail. */
+int frontend_v3_drag_hs_selftest(char *note, size_t cap) {
+    const int sv_gt = s_selected_game_type;
+    const TD5_ScreenIndex q_drag = frontend_results_quit_target();
+    const int ne_drag = frontend_name_entry_skips_mode();
+    TD5_ScreenIndex q_single;
+    int ne_single, fail;
+    s_selected_game_type = 0;
+    q_single = frontend_results_quit_target();
+    ne_single = frontend_name_entry_skips_mode();
+    s_selected_game_type = sv_gt;
+    fail = !(sv_gt == 9 && !td5_game_drag_mp_active() && !td5_game_mp_cup_active() &&
+             q_drag == TD5_SCREEN_MAIN_MENU && ne_drag == 1 &&
+             q_single == TD5_SCREEN_NAME_ENTRY && ne_single == 0);
+    /* short: the row note shares 120 chars with the invariant summary. Screens: 5 main menu, 25 name entry. */
+    snprintf(note, cap, "drag%d QUIT>%d skip%d; single QUIT>%d skip%d",
+             sv_gt, (int)q_drag, ne_drag, (int)q_single, ne_single);
+    return fail;
+}
+#endif
 
 void Screen_RaceResults(void) {
     switch (s_inner_state) {
@@ -11769,7 +11916,7 @@ void Screen_RaceResults(void) {
              * Once per race — the latch is cleared so re-viewing results is a no-op. */
             if (s_mp_hs_pending) {
                 s_mp_hs_pending = 0;
-                frontend_mp_register_high_scores();
+                if (!s_roam_postrace) frontend_mp_register_high_scores();   /* [round VE] a city race keeps no records */
             }
             if (td5_game_mp_cup_active() && !td5_game_mp_cup_has_next()) {
                 TD5_LOG_I(LOG_TAG, "RaceResults: local MP cup final race -> CUP_WINNERS -> MP post-race menu");
@@ -11827,6 +11974,13 @@ void Screen_RaceResults(void) {
             frontend_create_button(SNK_ViewRaceData,  RR_BX, RR_Y2, RR_BW, RR_BH);
             frontend_create_button(btn3,              RR_BX, RR_Y3, RR_BW, RR_BH);
             frontend_create_button(btn4,              RR_BX, RR_Y4, RR_BW, RR_BH);
+            /* [round VE] a city race has no View Replay: free roam discards the recorder (td5_game.c
+             * "free roam has no View Replay") and its streamed, rebased world is not replayable from inputs */
+            if (s_roam_postrace && s_button_count >= 2) {
+                s_buttons[1].disabled = 1;
+                TD5_LOG_I(LOG_TAG, "RaceResults: free-roam race menu: RACE AGAIN / VIEW REPLAY (greyed) / "
+                          "VIEW RACE DATA / SELECT NEW CAR / QUIT");
+            }
 
             if (is_cup && !next_valid) {
                 s_results_cup_complete = 1;
@@ -11866,6 +12020,14 @@ void Screen_RaceResults(void) {
         if (s_anim_tick >= 0x10) {
             switch (s_results_button) {
             case 0: /* Race Again / Next Cup Race */
+                if (s_roam_postrace) {
+                    /* [round VE] the same city route again, from the grid */
+                    s_roam_postrace = 0;
+                    if (!frontend_roam_postrace_rearm("RACE AGAIN")) {
+                        td5_frontend_set_screen(td5_frontend_roam_origin_screen());
+                        break;
+                    }
+                }
                 if (s_results_rerace_flag) {
                     /* Restore snapshot */
                     s_selected_car = s_snap_car;
@@ -11894,6 +12056,10 @@ void Screen_RaceResults(void) {
                 break;
 
             case 1: /* View Replay */
+                if (s_roam_postrace) {   /* [round VE] greyed for a city race: never reached, stay on the menu */
+                    s_inner_state = 0x0C;
+                    break;
+                }
                 /* [CONFIRMED @ 0x00422F2C case 1 in case 0xF]:
                  *   g_attractModeControlEnabled = 2
                  *   g_inputPlaybackActive = 1
@@ -11963,6 +12129,18 @@ void Screen_RaceResults(void) {
                 return;
 
             case 3: /* Save Race Status / Select New Car */
+                if (s_roam_postrace) {
+                    /* [round VE] car select, then the same city route (its OK launches the armed session,
+                     * its BACK cancels it and returns to the map the race came from) */
+                    s_roam_postrace = 0;
+                    if (!frontend_roam_postrace_rearm("SELECT NEW CAR")) {
+                        td5_frontend_set_screen(td5_frontend_roam_origin_screen());
+                        break;
+                    }
+                    frontend_roam_prepare_car_select();
+                    td5_frontend_set_screen(TD5_SCREEN_CAR_SELECTION);
+                    break;
+                }
                 if (s_selected_game_type >= 1 && s_selected_game_type <= 6) {
                     s_inner_state = 0x11; /* save cup data */
                 } else {
@@ -12013,33 +12191,25 @@ void Screen_RaceResults(void) {
                      * single-race quit path here only needs the screen jump.
                      * Game types 7 (Drag) and 9 (Drag Race) fall under "cup"
                      * here because the dispatch only special-cases <1, NOT 7/9. */
-                    if (td5_game_mp_cup_active()) {
-                        if (!td5_game_mp_cup_has_next()) {
-                            /* [MP CUP] series finished -> winners/podium screen. */
-                            td5_frontend_set_screen(TD5_SCREEN_CUP_WINNERS);
-                        } else {
-                            /* Quit mid-series -> abandon the cup to the main menu. */
-                            td5_game_mp_cup_end();
-                            td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
-                        }
-                    } else if (s_selected_game_type < 1 ||
-                               (s_selected_game_type == 9 && !td5_game_drag_mp_active())) {
-                        /* [DRAG HS 2026-09-12] Single-player drag now takes the same
-                         * high-score / name-entry route as a single race (game_type
-                         * < 1). Drag was previously shunted straight to MAIN_MENU
-                         * here, so a drag win never registered a record. MP drag
-                         * keeps the MP post-race path (handled earlier at state
-                         * 0xD), so it is excluded via td5_game_drag_mp_active(). */
-                        td5_frontend_set_screen(TD5_SCREEN_NAME_ENTRY);  /* 0x19 */
-                    } else if (!s_results_cup_complete) {
-                        td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);   /* 5 */
+                    /* [round VA 2026-11-09] the target is chosen by
+                     * frontend_results_quit_target() (side-effect free, so the
+                     * v3-drag-no-highscore row can ask it); the side effects of
+                     * two branches stay here. */
+                    if (s_roam_postrace) {
+                        /* [round VE] back to where the city race was started, no name entry / records */
+                        s_roam_postrace = 0;
+                        TD5_LOG_I(LOG_TAG, "RaceResults: free-roam QUIT -> screen %d",
+                                  (int)td5_frontend_roam_origin_screen());
+                        td5_frontend_set_screen(td5_frontend_roam_origin_screen());
                     } else {
-                        s_return_screen = TD5_SCREEN_NAME_ENTRY;         /* 0x19 */
-                        if (td5_game_get_finish_position(0) == 0) {
-                            td5_frontend_set_screen(TD5_SCREEN_CUP_WON);    /* 0x1B */
-                        } else {
-                            td5_frontend_set_screen(TD5_SCREEN_CUP_FAILED); /* 0x1A */
-                        }
+                        const TD5_ScreenIndex qt = frontend_results_quit_target();
+                        if (td5_game_mp_cup_active() && td5_game_mp_cup_has_next())
+                            td5_game_mp_cup_end();             /* quit mid-series: abandon the MP cup */
+                        if (qt == TD5_SCREEN_CUP_WON || qt == TD5_SCREEN_CUP_FAILED)
+                            s_return_screen = TD5_SCREEN_NAME_ENTRY;   /* 0x19 */
+                        if (s_selected_game_type == 9)
+                            TD5_LOG_I(LOG_TAG, "RaceResults: drag QUIT -> main menu (no high scores for drag)");
+                        td5_frontend_set_screen(qt);
                     }
                 break;
             }
@@ -12106,6 +12276,18 @@ void Screen_PostRaceNameEntry(void) {
         TD5_LOG_D(LOG_TAG, "PostRaceNameEntry: qualification check, game_type=%d",
                   s_selected_game_type);
 
+        /* [round VA 2026-11-09] No high scores for the drag strip (Mariano). The
+         * results QUIT no longer routes drag here; this guard covers any other way
+         * in, so a drag run never reaches the name prompt, the record insert or the
+         * table. */
+        if (frontend_name_entry_skips_mode()) {
+            TD5_LOG_I(LOG_TAG, "PostRaceNameEntry: drag race -> main menu (no high scores for drag)");
+            s_postrace_td6_level = 0;
+            s_post_race_score = 0;
+            td5_frontend_set_screen(TD5_SCREEN_MAIN_MENU);
+            break;
+        }
+
         /* Snapshot speeds NOW while the actor pool is still alive — by the
          * time case 4 fires (after name entry slide-in/typing/slide-out OR
          * the direct !qualifies jump) the race teardown may have invalidated
@@ -12127,18 +12309,8 @@ void Screen_PostRaceNameEntry(void) {
          * and the high-score table renders that (or "NO RECORDS YET"), never fake
          * names. Only single-race types reach a TD6 track (cups are TD5-only), so
          * this is gated to the non-cup branch below. 0 = normal TD5 path. */
-        /* [DRAG HS 2026-09-12] Single-player drag stores its finish TIME in a
-         * dedicated length-keyed record table (the shared TD6 record store, key
-         * from td5_save_drag_record_level). It renders/inserts through the same
-         * s_postrace_td6_level path as a TD6 track. MP drag uses the MP post-race
-         * path and never reaches here. */
-        if (s_selected_game_type == 9 && !td5_game_drag_mp_active()) {
-            int dlvl = td5_save_drag_record_level(td5_game_drag_length_level());
-            s_postrace_td6_level = (dlvl >= 0) ? dlvl : 0;
-        } else {
-            s_postrace_td6_level = (s_selected_game_type < 1 || s_selected_game_type == 7)
-                                   ? frontend_postrace_td6_level() : 0;
-        }
+        s_postrace_td6_level = (s_selected_game_type < 1 || s_selected_game_type == 7)
+                               ? frontend_postrace_td6_level() : 0;
 
         /* Compute group index for the high-score table.
          * Cup types 1-6: group = game_type + 0x13 (mirroring original case 0 at 0x413BCF).
@@ -12191,14 +12363,9 @@ void Screen_PostRaceNameEntry(void) {
              * point, LAP for circuit; the TD5 group_idx/grp is ignored. */
             const TD5_NpcGroup *grp;
             int group_type;
-            int is_sp_drag = (s_selected_game_type == 9 && !td5_game_drag_mp_active());
             if (s_postrace_td6_level > 0) {
                 const TD5_NpcGroup *td6grp = td5_save_get_td6_record_group(s_postrace_td6_level);
                 if (td6grp) group_type = td6grp->header & 3;
-                /* [DRAG HS 2026-09-12] A fresh drag table has no group yet; force
-                 * TIME (0) rather than the is_circuit fallback — the drag strip
-                 * reports "circuit" (no reverse) which would wrongly pick LAP. */
-                else if (is_sp_drag) group_type = 0;
                 else        group_type = frontend_track_is_circuit(s_selected_track) ? 1 : 0;
                 s_postrace_td6_score_type = group_type;
                 grp = NULL;                 /* never qualify against a TD5 group */
@@ -12312,10 +12479,7 @@ void Screen_PostRaceNameEntry(void) {
              * the name prompt. Applied AFTER the dev demo override on purpose: even
              * the harness must not fabricate a record for an auto-generated track,
              * because the insert would fail and leave a typed name going nowhere. */
-            /* [DRAG HS 2026-09-12] SP drag has its own dedicated length-keyed
-             * record home (not tied to s_selected_track), so it is exempt from the
-             * per-track high-score gate below. */
-            if (!is_sp_drag && !frontend_track_has_high_scores(s_selected_track)) {
+            if (!frontend_track_has_high_scores(s_selected_track)) {
                 if (qualifies)
                     TD5_LOG_I(LOG_TAG, "PostRaceNameEntry: high scores disabled for "
                               "track=%d (auto-generated / no record store) — skipping name entry",
@@ -12722,6 +12886,36 @@ void Screen_CupWon(void) {
 }
 
 #ifndef TD5RE_RELEASE
+/* [round VE 2026-11-09] v12 rows (see td5_frontend.h) */
+int frontend_ve_results_probe(int *inner_state, int *disabled_mask, char *labels, size_t cap)
+{
+    size_t l = 0;
+    int i, mask = 0;
+    if (inner_state) *inner_state = s_inner_state;
+    if (labels && cap) labels[0] = 0;
+    for (i = 0; i < s_button_count && i < FE_MAX_BUTTONS; i++) {
+        if (s_buttons[i].disabled) mask |= 1 << i;
+        if (labels && l < cap)
+            l += (size_t)snprintf(labels + l, cap - l, "%s%s%s%s", i ? " / " : "", s_buttons[i].label,
+                                  s_buttons[i].disabled ? "(grey)" : "", i == s_selected_button ? "*" : "");
+    }
+    if (disabled_mask) *disabled_mask = mask;
+    return s_button_count;
+}
+
+int frontend_ve_car_locked(void)
+{
+    const int c = frontend_current_car_index();
+    return !s_cheat_unlock_all && c >= 0 && c < 37 && s_car_lock_table[c] != 0;
+}
+
+void frontend_ve_mark_lobby_flow(void)
+{
+    s_mp_flow = 1;
+    if (g_td5.num_human_players > s_num_human_players) s_num_human_players = g_td5.num_human_players;
+    TD5_LOG_I(LOG_TAG, "v12: local-MP flow marked (humans=%d), as the lobby leaves it", s_num_human_players);
+}
+
 /* [round UE 2026-11-08] ue-hidden-rows (see td5_frontend.h). Runs from the selftest
  * verdict, off any menu: it rebuilds button sets into s_buttons, so it snapshots and
  * restores the whole button table and every selector flag it changes. */
@@ -12771,10 +12965,14 @@ int frontend_ue_rows_selftest(char *note, size_t cap) {
     UE_EXPECT(circ >= 0 && rev_track >= 0, "no circuit (%d) / reversible track (%d) found", circ, rev_track);
     s_mp_flow = 0; s_flow_context = 0;
     if (!fail) {
-        /* Q3: time trial hides LAPS even on a circuit; single race shows it. */
+        /* [round VA] time trial shows LAPS on a circuit (round UE's Q3 hid it), hides it point to point. */
         s_selected_game_type = 7; s_track_random = 0; s_selected_track = circ;
         trksel_build_main_buttons();
-        UE_EXPECT(s_buttons[2].hidden, "time trial: LAPS shown on circuit %d", circ);
+        UE_EXPECT(!s_buttons[2].hidden, "time trial: LAPS hidden on circuit %d", circ);
+        s_selected_track = rev_track;
+        trksel_build_main_buttons();
+        UE_EXPECT(s_buttons[2].hidden, "time trial: LAPS shown on point-to-point %d", rev_track);
+        s_selected_track = circ;
         s_selected_game_type = 0;
         trksel_build_main_buttons();
         UE_EXPECT(!s_buttons[2].hidden, "single race: LAPS hidden on circuit %d", circ);
@@ -12784,11 +12982,12 @@ int frontend_ue_rows_selftest(char *note, size_t cap) {
         UE_EXPECT(s_buttons[1].hidden && !s_buttons[2].hidden && s_buttons[2].y == TRKSEL_ROW_Y0 + TRKSEL_ROW_DY,
                   "select track RANDOM: dir hidden %d, laps hidden %d at y %d (want %d)", s_buttons[1].hidden,
                   s_buttons[2].hidden, s_buttons[2].y, TRKSEL_ROW_Y0 + TRKSEL_ROW_DY);
-        /* time trial + RANDOM: neither row, nothing below TRACK moves into a gap. */
+        /* time trial + RANDOM: same as single race since round VA (DIRECTION hides, LAPS takes its row). */
         s_selected_game_type = 7;
         trksel_build_main_buttons();
-        UE_EXPECT(s_buttons[1].hidden && s_buttons[2].hidden, "time trial RANDOM: dir %d laps %d shown",
-                  !s_buttons[1].hidden, !s_buttons[2].hidden);
+        UE_EXPECT(s_buttons[1].hidden && !s_buttons[2].hidden && s_buttons[2].y == TRKSEL_ROW_Y0 + TRKSEL_ROW_DY,
+                  "time trial RANDOM: dir shown %d, laps hidden %d at y %d", !s_buttons[1].hidden,
+                  s_buttons[2].hidden, s_buttons[2].y);
         /* back on a reversible track the rows return to their own slots */
         s_selected_game_type = 0; s_track_random = 0; s_selected_track = rev_track;
         trksel_build_main_buttons();
@@ -12832,7 +13031,7 @@ int frontend_ue_rows_selftest(char *note, size_t cap) {
     g_td5.reverse_direction = sv_rev; g_td5.mp_mode_config.mode = sv_mode;
     s_trksel_auto_btn = sv_auto; s_trksel_geo_btn = sv_geo; s_trksel_dyn_btn = sv_dyn;
     snprintf(note, cap, "%s", fail ? why
-             : "TB no TRAFFIC/POLICE, TT no LAPS/CP, cup no CP, MP drag MANUAL greyed, no gap on RANDOM (select track + quick race)");
+             : "TB no TRAFFIC/POLICE, TT LAPS on circuits only + no CP, cup no CP, MP drag MANUAL greyed, no gap on RANDOM");
     return fail;
 }
 #endif

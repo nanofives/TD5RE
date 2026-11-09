@@ -59,6 +59,11 @@ TD5_ScreenIndex td5_frontend_get_screen(void);
 /* [roam QA] The map screen the armed / running free-roam session came from (the FREE ROAM setup or
  * the SPRINT / CIRCUIT screen): where leaving free roam, or BACK out of its car select, returns. */
 TD5_ScreenIndex td5_frontend_roam_origin_screen(void);
+/* [round VE] td5_game.c: the race that just ended was a FINISHED free-roam race. The results screen and its
+ * post-race menu then serve the city race (no high scores, VIEW REPLAY greyed, RACE AGAIN / SELECT NEW CAR
+ * re-arm the same route, QUIT returns to td5_frontend_roam_origin_screen). Cleared by the menu's choice. */
+void frontend_roam_postrace_begin(void);
+int  frontend_roam_postrace_active(void);
 
 /* --- Test-harness hooks (StartScreen nav walker / scripted-input engine) ---
  * force_input: acquire(1)/release(0) — treat the window as focused so injected
@@ -139,7 +144,23 @@ int  frontend_ue_rows_selftest(char *note, size_t cap);
  * rolled through the real launch entry (independent rolls, pools, fixed and AI
  * seats untouched, cop-chase roles, the pane ring). 0 = pass, 1 = fail. */
 int  frontend_uf_mp_random_selftest(char *note, size_t cap);
+/* [round VA 2026-11-09] v3-drag-no-highscore: after a real SP drag race the results
+ * QUIT goes to the main menu and the post-race name entry refuses the run (no high
+ * scores for drag); a single race still goes to the name entry. 0 = pass. */
+int  frontend_v3_drag_hs_selftest(char *note, size_t cap);
+/* [round VE 2026-11-09] v12 rows: the results screen's inner state, its buttons' labels ("A / B(grey) / C*",
+ * * = focused) and a mask of the disabled ones. Returns the button count. */
+int  frontend_ve_results_probe(int *inner_state, int *disabled_mask, char *labels, size_t cap);
+/* The selftest's AutoRace launches split screen without the lobby, so the frontend's local-MP flow flag is off;
+ * the v12 split-screen row sets it the way the lobby leaves it (the MP post-race menu keys off it). */
+void frontend_ve_mark_lobby_flow(void);
+int  frontend_ve_car_locked(void);   /* the car select's current car cannot be raced (locked) */
 #endif
+/* [round VC 2026-11-09] What the cop-chase results table last drew per suspect
+ * (TD5_CHASE_*, 0 = not drawn): the v6-copchase-results row compares it with the
+ * race state. reset() clears it before a race. */
+int  frontend_vc_drawn_outcome(int slot);
+void frontend_vc_reset_drawn_outcomes(void);
 
 /* [SELECTABLE HORNS] Horn catalogue id chosen by local player `player`, or ""
  * when they never picked one (= use the car's own horn). Exposed so the race

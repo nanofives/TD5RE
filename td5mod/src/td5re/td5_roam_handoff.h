@@ -61,6 +61,16 @@ void td5_roam_handoff_clear(void);
 int  td5_roam_handoff_pending(void);
 void td5_roam_handoff_frame(void);
 
+/* [round VE] RACE AGAIN / SELECT NEW CAR after a finished city race. capture (td5_game.c, at the race end,
+ * while the session is still up) remembers the raced route's waypoints (lat/lon), type, laps and the race's
+ * opponents / traffic / cops. rearm (the post-race menu) arms a NEW roam session at that route's START and
+ * hands the same route over with AUTOSTART, exactly what the geo generator's RACE ROUTE does; the caller
+ * then launches it (frontend_init_race_schedule, or the car select's OK). 1 = done. The memory lives for the
+ * process; capture replaces it. */
+int  td5_roam_handoff_capture_rerun(void);
+int  td5_roam_handoff_rearm(void);
+int  td5_roam_handoff_rerun_valid(void);
+
 /* The last raced city route of a place, for Quick Race: routes/geo_map.json of `place` (written by
  * every handoff; F11b dropped the strip BUILD's _route/ROUTE_RAW.JSON fallback). Fills up to `max`
  * lat/lon pairs.

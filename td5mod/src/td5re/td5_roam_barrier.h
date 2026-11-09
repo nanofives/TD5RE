@@ -108,6 +108,12 @@ typedef struct {
     int tiles_read;
     double build_ms;
     uint32_t route_hash;
+    int shortcuts;            /* [round VD] DEV shortcut census: places where the surface links two route legs past the barriers (must be 0) */
+    double shortcut_gain_m;   /* [round VD] ... the most route length one of them skips */
+    int revisits;             /* [round VD] DEV shortcut census: sites inside ONE junction the route passes twice (not closable by a static barrier) */
+    double revisit_gain_m;    /* [round VD] ... the most route length one of them skips */
+    int glue_panels;          /* [round VD] panels across the seam of two touching route junctions far apart along the route */
+    int finish_pocket_closed; /* [round VD] 1 when the finish pocket's arm was barriered (the route passes that junction earlier) */
 } TD5_RoamBarrierStats;
 void td5_roam_barriers_stats(TD5_RoamBarrierStats *out);
 
@@ -116,6 +122,11 @@ void td5_roam_barriers_stats(TD5_RoamBarrierStats *out);
  * builds the barriers for each, logs + writes <log dir>/roam_barrier_census.txt and
  * roam_barrier_<route>.json (barriers + route polyline, place frame) and returns 1 (exit). */
 int td5_roam_barriers_dev_test(void);
+/* [round VD] DEV: run the shortcut census (a surface flood from the route, panels as cuts) after every build while on;
+ * TD5RE_ROAM_BARRIER_SHORTCUT=1 does the same. Results in TD5_RoamBarrierStats.shortcuts / shortcut_gain_m. */
+void td5_roam_barriers_set_shortcut_census(int on);
+/* [round VD] the `v9-barrier-no-shortcut` selftest: the census routes with the shortcut census; 0 PASS / 2 FAIL. */
+int  td5_roam_barriers_shortcut_selftest(char *note, size_t n);
 /* [HE] DEV: arm i of every cluster the last build sealed: status 0 taken by the route, 1 barriered, 2 linked (left
  * open on purpose: a twin carriageway / dead end), 3 OPEN; i < 0 returns the count. */
 int td5_roam_barriers_dev_arm(int i, int *status, uint64_t *edge_key, uint64_t *cluster_key);

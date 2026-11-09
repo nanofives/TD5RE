@@ -123,6 +123,24 @@ int  td5_roam_race_human_wrong_way(int slot);            /* that human's WRONG W
 void td5_roam_race_progress_slot(int slot, double *along_m, double *length_m, double *lateral_m);
 const TD5_RoamRaceResult *td5_roam_race_result_slot(int slot);   /* NULL past the human slots */
 
+/* ---- [round VE] the NORMAL race end (td5_game.c): fade, finishing place / star, results screen ---- */
+/* Once every human is through the line td5_game.c ends the race the way a normal race ends: it reads the
+ * final field below into its results tables, fades out (the victory star on a single-player win) and the
+ * frontend shows the normal results screen + post-race menu. The roam results panel is gone. */
+typedef struct {
+    int  slot;                       /* racer slot (0..humans-1 = the local humans, then the opponents) */
+    int  finished;                   /* 1 = crossed the line; 0 = an opponent still racing (time estimated) */
+    long ticks;                      /* race ticks at the line (30 Hz), or the estimate from its pace */
+    int  nlap;                       /* a circuit human: completed laps in lap[] */
+    long lap[TD5_RRACE_MAX_LAPS];    /* per-lap durations (ticks) */
+} TD5_RoamFinalEntry;
+int  td5_roam_race_end_ready(void);                                   /* 1 = every human is through: end the race now */
+int  td5_roam_race_final_field(TD5_RoamFinalEntry *out, int max);     /* rank order (1st first); count written */
+void td5_roam_race_setup_get(TD5_RoamRaceSetup *out);                 /* the running / last race's setup */
+#ifndef TD5RE_RELEASE
+void td5_roam_race_dev_hold_end(int on);   /* DEV: the sprint tests judge the finished race before the end runs */
+#endif
+
 /* ---- game hooks -------------------------------------------------------------- */
 void     td5_roam_race_frame(void);          /* once per rendered frame, after td5_roam_route_ui_frame */
 void     td5_roam_race_tick(void);           /* once per sim tick, after physics (normal tick path) */
@@ -131,7 +149,6 @@ uint32_t td5_roam_race_filter_bits(int slot, uint32_t bits);   /* a human throug
                                                                 * ([roam RA] every human slot; a pad's packed pedal axis
                                                                 * is rewritten, never its alias bits) */
 int      td5_roam_race_take_pause_close(void);   /* 1 once: the game closes its pause menu now */
-int      td5_roam_race_take_leave(void);         /* [roam HA] 1 once: the results were dismissed, the game leaves to the geo generator */
 int      td5_roam_race_take_countdown(void);     /* ticks per digit to arm the 3-2-1 with, once; 0 = none */
 int      td5_roam_race_hide_route_hint(void);    /* 1 = the route planner's HUD hint line stays off */
 
@@ -182,6 +199,7 @@ void     td5_roam_sprint_test_frame(void);   /* once per frame from td5_roam_rac
 void     td5_roam_sprint_test_disarm(void);
 /* [roam RA] the split-screen rows: n humans (slot 0 this test, the others simulated test players); per-human checks */
 void     td5_roam_sprint_test_set_humans(int n);
+void     td5_roam_sprint_test_set_natural_end(int on);   /* [round VE] the v12 row: no end hold, judged at the line */
 int      td5_roam_sprint_test_mode(void);
 uint32_t td5_roam_sprint_test_bits(struct TD5_Actor *a);   /* slot 0 control bits, 0 when idle */
 int      td5_roam_sprint_test_done(void);
