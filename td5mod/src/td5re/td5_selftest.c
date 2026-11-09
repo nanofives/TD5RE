@@ -729,6 +729,12 @@ static const RaceScenario k_races[] = {
     { .name="v4-tunnel-no-shadow",         .track=8,  .car=-1, .game_type=0, .player_is_ai=1,
       .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0, .mp_mode=-1, .span_offset=990,
       .car_damage=0, .lane_assist=0, .auto_gearbox=1, .depth=ST_DEPTH_RUN_5S, .ff=1, .vb_check=1 },
+    /* [round VB2] the same in COP CHASE with RAY TRACING on (Mariano's frame: RT MEDIUM on a 3070, the RT sun
+     * visibility leaked through the walls into hard lit / dark triangles). The verdict is the strength the RT
+     * sun-shadow pass ran with: skipped (<= 0.01) under the roof. TD5RE_SHADOW_ENCL_RT=0 = the control. */
+    { .name="v4-tunnel-no-shadow-rt",      .track=8,  .car=-1, .game_type=8, .player_is_ai=1,
+      .traffic=0, .opponents=0, .difficulty=0, .checkpoint_timers=0, .mp_mode=-1, .span_offset=990,
+      .car_damage=0, .lane_assist=0, .auto_gearbox=1, .rt=1, .depth=ST_DEPTH_RUN_5S, .ff=1, .vb_check=1 },
 };
 #define ST_RACE_COUNT  ((int)(sizeof(k_races) / sizeof(k_races[0])))
 static int s_t3_max_lap;   /* [round TA] t3-laps-shipped: highest lap the player completed */
@@ -3805,10 +3811,15 @@ static void st_vb_frame(void)
             {
                 const double sh = n ? (double)black / (double)n : 1.0;
                 const double ms = n ? (double)(black + white) / (double)n : 1.0;
-                s_vb_fail = !(q && frac >= 0.5f && fade >= 0.9f && sh <= 0.002);
+                /* RT on: the mask view is the RT-off pass's, so the RT verdict is the strength the RT sun-shadow
+                 * pass ran with (the probe skips it under the roof). */
+                const int rt = td5_rt_active();
+                s_vb_fail = rt ? !(q && frac >= 0.5f && fade >= 0.9f && str <= 0.01f)
+                               : !(q && frac >= 0.5f && fade >= 0.9f && sh <= 0.002);
                 snprintf(s_vb_note, sizeof s_vb_note,
-                         "shadowed %.3f%% (mask drawn on %.1f%%) of %lld scene px, roof probe covered %.2f fade %.2f "
-                         "strength %.3f %dx%d", sh * 100.0, ms * 100.0, n, (double)frac, (double)fade, (double)str, w, h);
+                         "%sshadowed %.3f%% (mask drawn on %.1f%%) of %lld scene px, roof probe covered %.2f fade %.2f "
+                         "strength %.3f %dx%d", rt ? "RT " : "", sh * 100.0, ms * 100.0, n, (double)frac, (double)fade,
+                         (double)str, w, h);
             }
         }
         TD5_LOG_I(LOG_TAG, "v4-tunnel-no-shadow: %s -> %s", s_vb_note, s_vb_fail ? "FAIL" : "PASS");

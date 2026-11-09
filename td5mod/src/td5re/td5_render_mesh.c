@@ -444,6 +444,12 @@ static float s_encl_q_strength[TD5_MAX_VIEWPORTS];
 static int   s_encl_q_valid[TD5_MAX_VIEWPORTS];
 static int   shadow_enclosure_enabled(void);
 static int   shadow_encl_log(void);
+static int shadow_encl_rt(void)   /* [round VB2] the probe also fades the RT sun shadows */
+{
+    static int v = -1;
+    if (v < 0) v = td5_env_int("TD5RE_SHADOW_ENCL_RT", 1, 0, 1);
+    return v;
+}
 static float shadow_encl_fraction(float *t_up, float *t_sun);
 static float s_encl_sun[3];                         /* defined with the probe (SECTION shadow enclosure probe) */
 static int   s_encl_sun_valid;
@@ -549,9 +555,18 @@ void td5_render_apply_shadow_pass(int vp, int vp_x, int vp_y)
         strength   = s_cs_str;                    /* fixed modest darkening (dom-independent) */
         cone_scale = s_cs_cone;                   /* wide soft contact penumbra */
     }
-    /* [round VB] Roof probe (see SECTION shadow enclosure probe): fade the RT-off
-     * march out under a roof, over ~0.2 s, per pane. */
-    if (!td5_rt_active() && vp >= 0 && vp < TD5_MAX_VIEWPORTS) {
+    /* [round VB] Roof probe (see SECTION shadow enclosure probe): fade the sun shadows
+     * out under a roof, over ~0.2 s, per pane. RT included (round VB2): the ray-traced
+     * sun visibility inside a tunnel is MIXED, not dark. rgen_shadow lifts each shadow
+     * ray's origin 64+ units along the sun direction, and on a wall that faces away from
+     * the sun that pushes the origin through the wall, where nothing is in the TLAS: the
+     * ray escapes and reads lit. Which wall triangles leak depends on how each faces the
+     * sun, so at RT strength (dom 0.9) the wall breaks into hard lit / dark triangles
+     * (Mariano's frame, RT MEDIUM on a 3070; TD5RE_RT_SHADOW_DEBUG=1 shows the right wall
+     * of the Honolulu tunnel sun-visible behind a hard diagonal edge, the road and the
+     * ceiling blocked). The RT contact shadow (no-sun tracks) is not faded.
+     * TD5RE_SHADOW_ENCL_RT=0 = RT unfaded, for A/B. */
+    if ((!td5_rt_active() || (!synth_contact && shadow_encl_rt())) && vp >= 0 && vp < TD5_MAX_VIEWPORTS) {
         static float    s_fade[TD5_MAX_VIEWPORTS];
         static uint32_t s_fade_ms[TD5_MAX_VIEWPORTS];
         static int      s_fade_on[TD5_MAX_VIEWPORTS];
@@ -1620,15 +1635,16 @@ static int td6_reverse_banner_page(int page)
  * geometry 400..ENCL_HEIGHT units over a ray = a roof (the 400 floor: an "ahead"
  * point that lands just under a hillside is no roof; translucent and
  * additive pages and billboards never count). The shadow pass fades by the covered
- * share (0, 1/2, 1) over ~0.2 s: off inside a tunnel, back in the open, a gantry
+ * share (0, 1/2, 1) over ~0.2 s, RT-off march and RT sun shadows alike (round VB2,
+ * see td5_render_apply_shadow_pass): off inside a tunnel, back in the open, a gantry
  * or a bridge deck overhead only dips it. Sweep of 16 tracks, 115 poses: every
  * tunnel pose 0 darkened pixels (was up to 135k at 1280x720), open poses unchanged.
  * Known limit: a street under overhanging terrain (Courmayeur 105..125, a hillside
  * triangle 3360 over the road; RT does shade it) loses its RT-off shadows too.
  * TD5RE_SHADOW_ENCL_SUNRAY=1 also requires the ray toward the sun to be blocked
- * (off: Newcastle's tunnel lets it out through its side openings). RT keeps its
- * own ray-traced shadows, so the probe runs with RT off only.
- * TD5RE_SHADOW_ENCLOSURE=0 = the old behaviour, for A/B. TD5RE_SHADOW_ENCL_LOG=1
+ * (off: Newcastle's tunnel lets it out through its side openings).
+ * TD5RE_SHADOW_ENCLOSURE=0 = the old behaviour (both paths), TD5RE_SHADOW_ENCL_RT=0
+ * keeps the probe off the RT path only, for A/B. TD5RE_SHADOW_ENCL_LOG=1
  * logs the hits and the probe's CPU time. Per thread: a pane's walk and its
  * shadow pass run on the same thread, one pane after the other. */
 #define ENCL_ORIGINS 2                              /* 0 = eye, 1 = the car the pane follows */
@@ -1976,7 +1992,7 @@ void td5_render_span_display_list(const TD5_SpanDisplayList *display_list_block)
     /* [round VB] roof probe live only where the RT-off sun march is (main view, not
      * the sky or the reflection overlay). */
     const int encl_on = shadow_enclosure_enabled() && td5_light2_active() &&
-                        td5_light2_sun_shadows() && !td5_rt_active() &&
+                        td5_light2_sun_shadows() && (!td5_rt_active() || shadow_encl_rt()) &&
                         !g_rs->in_sky_draw && !g_rs->in_reflection_overlay;
 
     for (int i = 0; i < count; i++) {
