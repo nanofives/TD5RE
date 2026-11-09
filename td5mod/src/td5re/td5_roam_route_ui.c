@@ -1397,6 +1397,8 @@ void td5_roam_route_ui_draw_world(int view)
         int ok;
         float gy;
         if (!w) continue;
+        /* [round VE item 11] in a race the START / FINISH gantries mark both ends: no red FINISH (or green START) line */
+        if (w->kind != TD5_ROUTE_WP_MID && td5_roam_race_state() >= TD5_RRACE_COUNTDOWN) continue;
         X = w->snapped ? w->sx : (double)w->px; Z = w->snapped ? w->sz : (double)w->pz;
         dx = X - px; dz = Z - pz;
         if (dx * dx + dz * dz > (900.0 * M) * (900.0 * M)) continue;

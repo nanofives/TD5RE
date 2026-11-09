@@ -48,6 +48,7 @@
 #include "td5_roam_ai.h"       /* GEO FREE ROAM AI racers (F7): opponents on the route, parked while roaming */
 #include "td5_roam_traffic.h"  /* GEO FREE ROAM ambient traffic (F8): pool slots, lane follower, signals */
 #include "td5_roam_cops.h"     /* GEO FREE ROAM police (F10): cop slots after the traffic pool */
+#include "td5_roam_handoff.h"  /* [round VE] the finished city race is remembered for RACE AGAIN / SELECT NEW CAR */
 #include "td5_police.h"        /* [round H HH] police pursuit in the normal races */
 #include "td5_frontend.h"
 #include "td5_horns.h"   /* [SELECTABLE HORNS] per-player horn catalogue */
@@ -623,6 +624,7 @@ static uint32_t s_race_end_timer_start;
 #define TD5_VICTORY_HOLD_MS 2500u
 static uint32_t s_victory_hold_start;   /* ms timestamp the star armed (0 = none) */
 static int      s_finish_position_display; /* 1-based place captured at finish (0 = none) */
+static int      s_roam_finish_results;     /* [round VE] this fade ends a FINISHED free-roam race: results screen */
 /* [MP per-viewport finish 2026-06-13] 1-based finishing place captured PER SLOT
  * the moment that slot crosses the line (0 = still racing). Drives each
  * split-screen viewport's own end-of-race indicator + coast-to-stop, so one
@@ -1640,8 +1642,18 @@ int td5_game_tick(void) {
             /* [GEO FREE ROAM F2-A] leaving free roam (pause menu "LEAVE FREE ROAM", or END
              * RACE NOW) goes back to the geo selector the player came from: no results screen */
             if (td5_roam_active()) {
+                /* [round VE] a FINISHED city race (roam_check_completion) ends like a normal race: the
+                 * results screen and its post-race menu, which re-arms the route for RACE AGAIN */
+                const int roam_results = (result == 1 && s_roam_finish_results);
+                s_roam_finish_results = 0;
                 td5_roam_end();
                 g_td5.game_state = TD5_GAMESTATE_MENU;
+                if (roam_results) {
+                    TD5_LOG_I(LOG_TAG, "Race finished (free roam race) -> results screen");
+                    frontend_roam_postrace_begin();
+                    td5_frontend_set_screen(TD5_SCREEN_RACE_RESULTS);
+                    return 0;
+                }
                 TD5_LOG_I(LOG_TAG, "Race exited (result=%d) -> leave free roam -> geo selector", result);
                 td5_frontend_set_screen(td5_frontend_roam_origin_screen());   /* [roam QA] map or FREE ROAM setup */
                 return 0;
@@ -5792,6 +5804,7 @@ int td5_game_init_race_session(void) {
     s_race_end_timer_start = 0;
     s_victory_hold_start = 0;
     s_finish_position_display = 0;
+    s_roam_finish_results = 0;     /* [round VE] */
 
     /* Reset results table */
     reset_results_table();
@@ -6795,6 +6808,70 @@ static void mt_build_pane_rcmd(int vp, void *unused)
  * fixed-timestep sim loop stays internally monolithic BY DESIGN - its
  * per-sub-tick locals and continue/break flow make interior splits a
  * behavior risk. Verified bit-identical via the golden-trace suite. */
+/* [round VE] FREE ROAM race end = the normal race end. Mariano 2026-11-09: "when finishing a race use the
+ * regular fade animation, the position (the star if it's first place), and use the regular menu for end of
+ * race". Each human's place is captured as it crosses (the per-viewport finish digit, td5_hud.c); once every
+ * human is through (td5_roam_race_end_ready) the roam field goes into the SAME results tables a normal race
+ * fills (s_metrics / s_slot_state / s_race_order -> build_results_table), the local player's place drives
+ * the centred digit, and td5_game_begin_fade_out runs its usual star gate. The fade ends with result 1 and
+ * the FSM sends a finished roam race to the results screen (frontend_roam_postrace_begin) instead of the geo
+ * selector. Racer slots outside the roam field are marked not raced (state 3) so the table lists only it. */
+static void roam_check_completion(void)
+{
+    TD5_RoamFinalEntry fe[TD5_MAX_RACER_SLOTS];
+    uint8_t in_field[TD5_MAX_RACER_SLOTS] = { 0 };
+    TD5_Actor *pl;
+    int n, r, i, h, k, place = 1;
+    const int humans = td5_roam_race_humans();
+    if (g_td5.race_end_fade_state != 0) return;
+    for (h = 0; h < humans && h < TD5_MAX_RACER_SLOTS; h++) {
+        if (s_slot_finish_place[h] == 0 && td5_roam_race_human_finished(h)) {
+            const int rank = td5_roam_ai_human_rank(h);
+            s_slot_finish_place[h] = rank > 0 ? rank : 1;
+            TD5_LOG_I(LOG_TAG, "Viewport finish (roam): slot=%d place=%d", h, s_slot_finish_place[h]);
+        }
+    }
+    if (!td5_roam_race_end_ready()) return;
+    n = td5_roam_race_final_field(fe, TD5_MAX_RACER_SLOTS);
+    if (n <= 0) return;
+    for (r = 0; r < n; r++) {
+        const int sl = fe[r].slot;
+        ActorRaceMetric *m;
+        TD5_Actor *a;
+        if (sl < 0 || sl >= TD5_MAX_RACER_SLOTS) continue;
+        in_field[sl] = 1;
+        m = &s_metrics[sl];
+        m->post_finish_metric_base = fe[r].ticks > 0 ? (int32_t)fe[r].ticks : 1;
+        m->cumulative_timer = m->post_finish_metric_base;
+        m->display_position = (int16_t)r;
+        memset(m->lap_split_times, 0, sizeof m->lap_split_times);
+        for (k = 0; k < fe[r].nlap && k < 9; k++)
+            m->lap_split_times[k] = (int16_t)(fe[r].lap[k] > 32767 ? 32767 : fe[r].lap[k]);
+        if (s_slot_state[sl].state == 3) s_slot_state[sl].state = 1;
+        s_slot_state[sl].companion_1 = 1;
+        s_slot_state[sl].companion_2 = fe[r].finished ? 1 : 0;   /* 1 = crossed the line (an estimate is not) */
+        s_race_order[r] = (uint8_t)sl;
+        a = td5_game_get_actor(sl);
+        if (a) a->race_position = (uint8_t)r;
+        if (sl == 0) place = r + 1;
+        TD5_LOG_I(LOG_TAG, "Roam race end: %d. slot=%d %s ticks=%ld laps=%d", r + 1, sl,
+                  fe[r].finished ? "finished" : "racing (estimated)", fe[r].ticks, fe[r].nlap);
+    }
+    for (i = 0, r = n; i < TD5_MAX_RACER_SLOTS; i++) {
+        if (in_field[i]) continue;
+        s_slot_state[i].state = 3;           /* not in the roam field: no row in the results */
+        if (r < TD5_MAX_RACER_SLOTS) s_race_order[r++] = (uint8_t)i;
+    }
+    build_results_table();
+    td5_roam_handoff_capture_rerun();        /* RACE AGAIN / SELECT NEW CAR run this route again */
+    pl = td5_game_get_actor(0);
+    s_finish_position_display = place;
+    s_roam_finish_results = 1;
+    TD5_LOG_I(LOG_TAG, "Roam race end: %d racer(s), player place %d (race_position %d), humans %d -> normal fade",
+              n, place, pl ? (int)pl->race_position : -1, humans);
+    td5_game_begin_fade_out(g_td5.split_screen_mode);
+}
+
 static void frame_check_completion(void)
 {
     /* ---- Race completion check (before sim loop) ----
@@ -6805,9 +6882,10 @@ static void frame_check_completion(void)
      * The port mirrors that cadence: advance_pending_finish_state runs once
      * per frame per active slot here, feeding the results of any finish
      * promotion into check_race_completion's aggregate scan below. */
-    /* [GEO FREE ROAM F2-A] roam never finishes: no lap/checkpoint/finish detector, no
-     * aggregate completion scan, no results (the only way out is "Leave free roam") */
-    if (td5_roam_active()) return;
+    /* [GEO FREE ROAM F2-A] roam has no lap/checkpoint/finish detector of its own: free roam never
+     * finishes. [round VE] A city RACE ends the normal way once every human is through its finish
+     * (roam_check_completion: results tables, fade, place / star, then the results screen). */
+    if (td5_roam_active()) { roam_check_completion(); return; }
     if (g_td5.race_end_fade_state == 0) {
         int pf;
         uint32_t frame_accum = td5_game_normalized_dt_to_accum(g_td5.normalized_frame_dt);
@@ -6955,14 +7033,6 @@ static int frame_run_sim_loop(int net_lockstep, int net_decoupled)
             s_resume_countdown_state = 0;
             s_resume_countdown_roam = 1;
         }
-    }
-    if (td5_roam_race_take_leave() && !s_pause_exit_pending) {
-        /* [roam HA] results dismissed: the LEAVE FREE ROAM exit (fade, release, back to the geo generator) */
-        s_pause_menu_active = 0;
-        s_pause_exit_pending = 1;
-        s_finish_position_display = 0;
-        td5_game_begin_fade_out(0);
-        TD5_LOG_I(LOG_TAG, "Roam race results dismissed -> leaving to the geo generator");
     }
 
     /* [BUG 5a 2026-06-15] Per-frame ESC edge for the cinematic abort.
