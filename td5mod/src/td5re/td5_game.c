@@ -8644,7 +8644,7 @@ static void frame_render(void)
          * opaque world), then the additive light pass — this order keeps
          * headlight pools from being darkened by the shadow term. */
         if (!td5_render_photobooth_active())
-            td5_render_apply_shadow_pass(s_viewports[vp].x, s_viewports[vp].y);
+            td5_render_apply_shadow_pass(vp, s_viewports[vp].x, s_viewports[vp].y);
 
         /* [RT2 P4] Sky-visibility GI: multiplicative, right after the sun-shadow
          * composite and BEFORE the additive lights (so headlight pools aren't

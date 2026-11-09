@@ -107,7 +107,7 @@ void td5_render_apply_light_pass(int vp_x, int vp_y);
 /* [LIGHT2 P2] Screen-space ray-marched sun shadows for the current viewport.
  * Call once per viewport after the opaque world, BEFORE
  * td5_render_apply_light_pass (additive light pools must not be darkened). */
-void td5_render_apply_shadow_pass(int vp_x, int vp_y);
+void td5_render_apply_shadow_pass(int vp, int vp_x, int vp_y);   /* [round VB] vp = pane index (roof-probe fade state) */
 void td5_render_apply_gi_pass(int vp_x, int vp_y);   /* [RT2 P4] sky-visibility GI */
 
 /* [LIGHT2 P3] Screen-space reflections for the current viewport. Call once
@@ -392,6 +392,10 @@ int td5_render_sky_sun_check(char *note, int note_len);
  * casts from (+Y down) and the sky sun the disc is drawn at (+Y down, valid when
  * *sky_cls == TD5_SKY_SUNNY). Returns the shadow class (0 = no sun shadows). */
 int td5_render_shadow_sun_query(float shadow[3], float sky[3], int *sky_cls);
+/* [round VB] Roof probe of pane vp's last RT-off sun-shadow pass: covered share of
+ * the probe rays (0..1, -1 = no probe), the applied fade (0 = full shadows, 1 = none)
+ * and the strength the pass ran with. Returns 0 when that pane never ran the pass. */
+int td5_render_shadow_enclosure_query(int vp, float *frac, float *fade, float *strength);
 /* Draw the sun disc (SUNNY + HIGH only); called from the sky phase after the
  * dome, before the world. No-op otherwise. */
 void td5_render_draw_sun_disc(void);
