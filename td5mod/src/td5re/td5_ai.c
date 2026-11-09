@@ -1262,6 +1262,10 @@ int td5_ai_wanted_cop_hit(int cop_slot, int suspect_slot, int32_t impact_mag) {
         }
     }
 
+    /* [round VC 2026-11-09] Count the ram for the cop-chase results ("who you
+     * rammed"): every material hit past the siren gate, first hit included. */
+    td5_game_add_wanted_ram(suspect_slot);
+
     /* First-hit-vs-rehit branch [orig 0x0043D6D8]: if the HUD overlay was
      * NOT pointing at this suspect last frame, this is a "first hit" — reset
      * the wanted-message banner, choose a random message, and return

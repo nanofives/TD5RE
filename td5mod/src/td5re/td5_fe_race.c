@@ -10587,6 +10587,13 @@ static const char *frontend_summary_car_name(int slot) {
     static int   s_for_car[TD5_MAX_RACER_SLOTS];
     if (slot < 0 || slot >= TD5_MAX_RACER_SLOTS) return "";
     int car = (slot >= 0 && slot < TD5_MAX_RACER_SLOTS) ? g_td5.ai_car_indices[slot] : 0;
+    /* [round VC 2026-11-09] A cop chase swaps slot 0's car to a police car in
+     * g_td5.car_index (td5_game.c cop-car forcing loop), not in ai_car_indices[0]:
+     * read the car the slot really drove, or the cop row names the menu pick. */
+    if (td5_game_is_wanted_mode()) {
+        int real = td5_game_get_slot_car_index(slot);
+        if (real >= 0) car = real;
+    }
     if (s_loaded[slot] && s_for_car[slot] == car) return s_name[slot];
     s_loaded[slot]  = 1;
     s_for_car[slot] = car;
@@ -10687,20 +10694,27 @@ void  fe_draw_small_text(float x, float y, const char *text, uint32_t color, flo
 float fe_measure_small_text(const char *text);
 void  frontend_format_score_time(char *buf, size_t cap, int raw_ticks, int type);
 
+/* [round VC] Cut `buf` until it measures <= `max_w` canvas px (small font). */
+static void fe_cop_chase_fit(char *buf, float max_w) {
+    size_t n = strlen(buf);
+    while (n > 1 && fe_measure_small_text(buf) > max_w) buf[--n] = '\0';
+}
+
 /* [MP COP CHASE RESULTS 2026-06-25] Draw the shared right-hand columns
- * (CAR / TOP SPEED / AVG SPEED / HITS / AIR TIME) for one cop-chase results row.
- * The mode-specific third column (ARRESTS for cops, ARREST TIME for suspects) is
- * drawn by the caller; this keeps "all the other values" identical between the
+ * (CAR / TOP SPEED / AVG SPEED / last column) for one cop-chase results row.
+ * The mode columns (ARRESTS + POINTS for cops, OUTCOME + BUSTED AT for suspects)
+ * and the last column's value (HITS / RAMMED) come from the caller [round VC]; this keeps "all the other values" identical between the
  * COPS and SUSPECTS sections. Columns are centred on their canvas-x like the
  * standard MP table. */
 static void fe_cop_chase_draw_common(int slot, float y, uint32_t color,
                                      float sx, float sy, float gsx, float sum_slide,
                                      int kph, const char *unit,
                                      float cx_car, float cx_top, float cx_avg,
-                                     float cx_hits, float cx_air) {
+                                     float cx_hits, int hits_value) {
     char buf[40];
     #define CC_CTR(CX, S) (((CX) + sum_slide) * sx - fe_measure_small_text(S) * 0.5f * gsx)
     snprintf(buf, sizeof(buf), "%s", frontend_summary_car_name(slot));
+    fe_cop_chase_fit(buf, 78.0f);
     fe_draw_small_text(CC_CTR(cx_car, buf), y, buf, color, sx, sy);
 
     const TD5_RaceMetrics *m = td5_game_get_metrics(slot);
@@ -10713,13 +10727,27 @@ static void fe_cop_chase_draw_common(int slot, float y, uint32_t color,
     snprintf(buf, sizeof(buf), "%d%s", frontend_summary_speed_disp(avg_raw, kph), unit);
     fe_draw_small_text(CC_CTR(cx_avg, buf), y, buf, color, sx, sy);
 
-    int collisions = m ? m->collisions : 0;
-    int air_tenths = m ? (m->air_ticks * 10 + 15) / 30 : 0;
-    snprintf(buf, sizeof(buf), "%d", collisions);
+    /* [round VC] the last column is the caller's: HITS (all collisions) for a cop,
+     * RAMMED (the cop's material rams on this suspect) for a suspect. The AIR TIME
+     * column is gone from the chase table: the OUTCOME + BUSTED AT columns needed
+     * the room, and air time says nothing about a chase. */
+    snprintf(buf, sizeof(buf), "%d", hits_value);
     fe_draw_small_text(CC_CTR(cx_hits, buf), y, buf, color, sx, sy);
-    snprintf(buf, sizeof(buf), "%d.%ds", air_tenths / 10, air_tenths % 10);
-    fe_draw_small_text(CC_CTR(cx_air, buf), y, buf, color, sx, sy);
     #undef CC_CTR
+}
+
+/* [round VC 2026-11-09] What the cop-chase results table last DREW per suspect
+ * (TD5_CHASE_*, 0 = not drawn), so the v6-copchase-results row can check the
+ * screen against the race state instead of trusting the accessor alone. */
+static int s_vc_drawn_outcome[TD5_MAX_RACER_SLOTS];
+static void fe_vc_note_drawn_outcome(int slot, int oc) {
+    if (slot >= 0 && slot < TD5_MAX_RACER_SLOTS) s_vc_drawn_outcome[slot] = oc;
+}
+int frontend_vc_drawn_outcome(int slot) {
+    return (slot >= 0 && slot < TD5_MAX_RACER_SLOTS) ? s_vc_drawn_outcome[slot] : 0;
+}
+void frontend_vc_reset_drawn_outcomes(void) {
+    for (int i = 0; i < TD5_MAX_RACER_SLOTS; i++) s_vc_drawn_outcome[i] = 0;
 }
 
 /* [r3 2026-06-15] Race-results table, reworked to the HIGH-SCORES format
@@ -10768,17 +10796,30 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
      * '-' if they escaped to the finish un-arrested). Every other column —
      * CAR / TOP SPEED / AVG SPEED / HITS / AIR TIME — is kept. The original has
      * no MP cop-chase results screen, so this is a port-only layout. */
-    if (td5_game_mp_cop_chase_active()) {
+    /* [round VC 2026-11-09] Mariano item 6: SINGLE-PLAYER cop chase uses this table
+     * too (it fell into the plain race table: finish times, no word on who got
+     * away). Each SUSPECT row now says what happened to it: OUTCOME = BUSTED (its
+     * damage bar drained by the cop's rams) or ESCAPED, BUSTED AT = the time of the
+     * arrest, RAMMED = the cop's material rams on it. COPS show ARRESTS + the ram
+     * POINTS the HUD counted. Outcomes come from td5_game_cop_chase_outcome, frozen
+     * from the mode's state when the results table was built. */
+    if (td5_game_is_wanted_mode()) {
             #define CHASE_CTR(CX, S) (((CX) + sum_slide) * sx - fe_measure_small_text(S) * 0.5f * gsx)
         /* Column anchors (640x480 canvas px): NAME left-aligned at the title
-         * edge; the rest centred. The 3rd column carries the mode value. */
-        const float cc_name = 126.0f;
-        const float cc_car  = 222.0f;
-        const float cc_stat = 312.0f;   /* ARRESTS (cops) / ARREST TIME (suspects) */
-        const float cc_top  = 378.0f;
-        const float cc_avg  = 436.0f;
-        const float cc_hits = 492.0f;
-        const float cc_air  = 552.0f;
+         * edge; the rest centred. Columns 3 + 4 carry the mode values. */
+        /* Widths measured on the 2026-11-09 frame (small font, canvas px): names
+         * ~70, car names <= 78 (fitted), OUTCOME / ESCAPED ~60, a time ~55, a
+         * speed ~50, RAMMED ~55. Long headers go on two lines (TOP / SPEED). */
+        const float cc_name  = 120.0f;   /* left edge; names fitted to 78 px      */
+        const float cc_car   = 242.0f;
+        const float cc_stat  = 316.0f;   /* ARRESTS (cops) / OUTCOME (suspects)   */
+        const float cc_stat2 = 380.0f;   /* POINTS (cops)  / BUSTED AT (suspects) */
+        const float cc_top   = 438.0f;
+        const float cc_avg   = 494.0f;
+        const float cc_hits  = 552.0f;   /* HITS (cops)    / RAMMED (suspects)    */
+        const float cc_end   = 586.0f;   /* separator right edge                  */
+        const uint32_t CC_BUSTED  = 0xFFFF6A4Au;   /* red-orange: arrested */
+        const uint32_t CC_ESCAPED = 0xFF7CE07Cu;   /* green: got away      */
         const uint32_t CC_HDR   = 0xFFFFFFFFu;   /* white headers        */
         const uint32_t CC_TITLE = 0xFFFFC23Au;   /* amber section titles  */
         const uint32_t CC_SELF  = 0xFFD9C50Cu;   /* gold = local player   */
@@ -10800,28 +10841,40 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
         for (int section = 0; section < 2; section++) {
             int  cnt   = section == 0 ? n_cop : n_sus;
             int *slots = section == 0 ? cc_cop : cc_sus;
-            const char *title    = section == 0 ? "COPS" : "SUSPECTS";
-            const char *stat_hdr = section == 0 ? "ARRESTS" : "ARREST TIME";
+            const char *title     = section == 0 ? TR("COPS") : TR("SUSPECTS");
+            const char *stat_hdr  = section == 0 ? TR("ARRESTS") : TR("OUTCOME");
+            const char *stat2_hdr = section == 0 ? TR("POINTS") : TR("BUSTED AT");
 
             /* Section title (left-aligned at the title edge). */
             fe_draw_small_text((cc_name + sum_slide) * sx, yc * sy, title, CC_TITLE, sx, sy);
-            yc += 16.0f;
+            yc += 22.0f;   /* room for the two-line headers' top line (yc - 7) */
 
-            /* Column headers. */
-            { const char *h_name = TR("NAME"), *h_car = TR("CAR"), *h_tsp = TR("TOP SPD");
-              const char *h_asp  = TR("AVG SPD"), *h_hit = TR("HITS"), *h_air = TR("AIR");
-              fe_draw_small_text((cc_name + sum_slide) * sx, yc * sy, h_name, CC_HDR, sx, sy);
-              fe_draw_small_text(CHASE_CTR(cc_car,  h_car),   yc * sy, h_car,    CC_HDR, sx, sy);
-              fe_draw_small_text(CHASE_CTR(cc_stat, stat_hdr),yc * sy, stat_hdr, CC_HDR, sx, sy);
-              fe_draw_small_text(CHASE_CTR(cc_top,  h_tsp),   yc * sy, h_tsp,    CC_HDR, sx, sy);
-              fe_draw_small_text(CHASE_CTR(cc_avg,  h_asp),   yc * sy, h_asp,    CC_HDR, sx, sy);
-              fe_draw_small_text(CHASE_CTR(cc_hits, h_hit),   yc * sy, h_hit,    CC_HDR, sx, sy);
-              fe_draw_small_text(CHASE_CTR(cc_air,  h_air),   yc * sy, h_air,    CC_HDR, sx, sy); }
+            /* Column headers: single words on the middle line (yc), two-word
+             * headers stacked on yc - 7 / yc + 7 like the race results table. */
+            { const char *h_name = TR("NAME"), *h_car = TR("CAR"), *h_speed = TR("SPEED");
+              const char *h_top  = TR("TOP"), *h_avg = TR("AVG");
+              const char *h_hit  = section == 0 ? TR("HITS") : TR("RAMMED");
+              const float ht = (yc - 7.0f) * sy, hm = yc * sy, hb = (yc + 7.0f) * sy;
+              fe_draw_small_text((cc_name + sum_slide) * sx, hm, h_name, CC_HDR, sx, sy);
+              fe_draw_small_text(CHASE_CTR(cc_car,  h_car),    hm, h_car,    CC_HDR, sx, sy);
+              fe_draw_small_text(CHASE_CTR(cc_stat, stat_hdr), hm, stat_hdr, CC_HDR, sx, sy);
+              if (section == 0) {
+                  fe_draw_small_text(CHASE_CTR(cc_stat2, stat2_hdr), hm, stat2_hdr, CC_HDR, sx, sy);
+              } else {
+                  const char *h_b = TR("BUSTED"), *h_at = TR("AT");
+                  fe_draw_small_text(CHASE_CTR(cc_stat2, h_b),  ht, h_b,  CC_HDR, sx, sy);
+                  fe_draw_small_text(CHASE_CTR(cc_stat2, h_at), hb, h_at, CC_HDR, sx, sy);
+              }
+              fe_draw_small_text(CHASE_CTR(cc_top,  h_top),   ht, h_top,   CC_HDR, sx, sy);
+              fe_draw_small_text(CHASE_CTR(cc_top,  h_speed), hb, h_speed, CC_HDR, sx, sy);
+              fe_draw_small_text(CHASE_CTR(cc_avg,  h_avg),   ht, h_avg,   CC_HDR, sx, sy);
+              fe_draw_small_text(CHASE_CTR(cc_avg,  h_speed), hb, h_speed, CC_HDR, sx, sy);
+              fe_draw_small_text(CHASE_CTR(cc_hits, h_hit),   hm, h_hit,   CC_HDR, sx, sy); }
             /* Header/rows separator. */
-            td5_vui_quad((cc_name + sum_slide) * sx, (yc + 9.0f) * sy,
-                         (cc_air + 24.0f - cc_name) * sx, 2.0f * sy,
+            td5_vui_quad((cc_name + sum_slide) * sx, (yc + 16.0f) * sy,
+                         (cc_end - cc_name) * sx, 2.0f * sy,
                          0xFFB0B8C0u, -1, 0.0f, 0.0f, 1.0f, 1.0f);
-            yc += 18.0f;
+            yc += 25.0f;
 
             if (cnt == 0) {
                 fe_draw_small_text((cc_name + sum_slide) * sx, yc * sy,
@@ -10843,26 +10896,44 @@ void frontend_render_race_summary_overlay(float sx, float sy) {
                     const char *pn = frontend_human_display_name(slot);
                     if (pn) snprintf(nb, sizeof(nb), "%s", pn);
                     else    snprintf(nb, sizeof(nb), "P%d", slot + 1);
+                } else if (section == 1) {
+                    /* [round VC] AI speeders are numbered, not N identical "CPU"s */
+                    snprintf(nb, sizeof(nb), "%s %d", TR("SPEEDER"), k + 1);
                 } else {
                     snprintf(nb, sizeof(nb), "%s", TR("CPU"));
                 }
+                fe_cop_chase_fit(nb, 78.0f);   /* [round VC] never run into the CAR column */
                 fe_draw_small_text((cc_name + sum_slide) * sx, y, nb, rc, sx, sy);
 
-                /* Mode-specific 3rd column: cops show ARREST count, suspects show
-                 * TIME OF ARREST ('-' when never arrested / finished the race). */
-                char vb[28];
+                /* Mode columns 3 + 4. Cops: ARRESTS, ram POINTS. Suspects: OUTCOME
+                 * (BUSTED / ESCAPED, coloured) and BUSTED AT (time of the arrest,
+                 * '-' for a suspect that got away). */
+                char vb[28], vb2[28];
+                uint32_t oc_col = rc;
+                int hits_value;
                 if (section == 0) {
+                    const TD5_RaceMetrics *cm = td5_game_get_metrics(slot);
                     snprintf(vb, sizeof(vb), "%d", td5_game_get_wanted_kills(slot));
+                    snprintf(vb2, sizeof(vb2), "%d", td5_game_get_wanted_score(slot));
+                    hits_value = cm ? cm->collisions : 0;
                 } else {
-                    int32_t at = td5_game_get_arrest_time(slot);
-                    if (at > 0) frontend_format_score_time(vb, sizeof(vb), at, 0);
-                    else        snprintf(vb, sizeof(vb), "-");
+                    const int oc = td5_game_cop_chase_outcome(slot);
+                    const int32_t at = td5_game_get_arrest_time(slot);
+                    snprintf(vb, sizeof(vb), "%s", TR(td5_game_cop_chase_outcome_name(oc)));
+                    oc_col = (oc == TD5_CHASE_BUSTED) ? CC_BUSTED
+                           : (oc == TD5_CHASE_ESCAPED) ? CC_ESCAPED : rc;
+                    if (oc == TD5_CHASE_BUSTED && at > 0) frontend_format_score_time(vb2, sizeof(vb2), at, 0);
+                    else                                  snprintf(vb2, sizeof(vb2), "-");
+                    hits_value = td5_game_get_wanted_rams(slot);
+                    fe_vc_note_drawn_outcome(slot, oc);
                 }
-                fe_draw_small_text(CHASE_CTR(cc_stat, vb), y, vb, rc, sx, sy);
+                fe_draw_small_text(CHASE_CTR(cc_stat, vb), y, vb, oc_col, sx, sy);
+                fe_draw_small_text(CHASE_CTR(cc_stat2, vb2), y, vb2, rc, sx, sy);
 
-                /* Shared CAR / speeds / HITS / AIR columns ("all the other values"). */
+                /* Shared CAR / speeds / last columns ("all the other values"). */
                 fe_cop_chase_draw_common(slot, y, rc, sx, sy, gsx, sum_slide,
-                                         kph, unit, cc_car, cc_top, cc_avg, cc_hits, cc_air);
+                                         kph, unit, cc_car, cc_top, cc_avg, cc_hits,
+                                         hits_value);
                 yc += row_h;
             }
             yc += 14.0f;   /* gap before the next section */
